@@ -22,7 +22,7 @@ from networks import BACKBONE
 from loss import LOSSFUNC
 
 import loralib as lora
-from transformers import AutoProcessor, CLIPModel, ViTModel, ViTConfig
+from transformers import AutoProcessor, CLIPModel, ViTModel, ViTConfig, AutoModel
 
 logger = logging.getLogger(__name__)
 
@@ -39,29 +39,34 @@ class EffortDetector(nn.Module):
         self.correct, self.total = 0, 0
 
     def build_backbone(self, config):
-        # Download model
-        # https://huggingface.co/openai/clip-vit-large-patch14
+        # Tải model DINOv2 Large
+        model_name = "facebook/dinov2-large"
+        print(f"Loading backbone: {model_name}")
         
-        # mean: [0.48145466, 0.4578275, 0.40821073]
-        # std: [0.26862954, 0.26130258, 0.27577711]
+        # Load model gốc
+        backbone = AutoModel.from_pretrained(model_name)
+
+        # Cấu hình SVD
+        # Hidden size của Large là 1024, nên r = 1024 - 1
+        r_val = 1024 - 1
         
-        # ViT-L/14 224*224
-        clip_model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
+        # Áp dụng SVD (Hàm này đã được sửa ở dưới để tìm đúng tên layer của DINO)
+        backbone = apply_svd_residual_to_self_attn(backbone, r=r_val)
 
-        # Apply SVD to self_attn layers only
-        # ViT-L/14 224*224: 1024-1
-        clip_model.vision_model = apply_svd_residual_to_self_attn(clip_model.vision_model, r=1024-1)
-
-        for name, param in clip_model.vision_model.named_parameters():
-            print('{}: {}'.format(name, param.requires_grad))
-        num_param = sum(p.numel() for p in clip_model.vision_model.parameters() if p.requires_grad)
-        num_total_param = sum(p.numel() for p in clip_model.vision_model.parameters())
+        for name, param in backbone.named_parameters():
+            if 'encoder.layer.0' in name: 
+                print('{}: {}'.format(name, param.requires_grad))
+        
+        num_param = sum(p.numel() for p in backbone.parameters() if p.requires_grad)
+        num_total_param = sum(p.numel() for p in backbone.parameters())
         print('Number of total parameters: {}, tunable parameters: {}'.format(num_total_param, num_param))
 
-        return clip_model.vision_model
+        return backbone
 
     def features(self, data_dict: dict) -> torch.tensor:
-        feat = self.backbone(data_dict['image'])['pooler_output']
+        output = self.backbone(data_dict['image'])
+        feat = output.last_hidden_state[:, 0, :]
+        
         return feat
 
     def classifier(self, features: torch.tensor) -> torch.tensor:
@@ -225,29 +230,38 @@ class SVDResidualLinear(nn.Module):
         return loss
         
 
-# Function to replace nn.Linear modules within self_attn modules with SVDResidualLinear
 def apply_svd_residual_to_self_attn(model, r):
     for name, module in model.named_children():
-        if 'self_attn' in name:
-            # Replace nn.Linear layers in this module
+        # SỬA ĐỔI: Kiểm tra cả 'attention' (cho DINOv2) và 'self_attn' (cho CLIP/ViT cũ)
+        if 'attention' in name or 'self_attn' in name:
             for sub_name, sub_module in module.named_modules():
                 if isinstance(sub_module, nn.Linear):
-                    # Get parent module within self_attn
                     parent_module = module
                     sub_module_names = sub_name.split('.')
+                    
+                    # Logic tìm parent module an toàn hơn
+                    valid_path = True
                     for module_name in sub_module_names[:-1]:
-                        parent_module = getattr(parent_module, module_name)
-                    # Replace the nn.Linear layer with SVDResidualLinear
-                    setattr(parent_module, sub_module_names[-1], replace_with_svd_residual(sub_module, r))
+                        if hasattr(parent_module, module_name):
+                            parent_module = getattr(parent_module, module_name)
+                        else:
+                            valid_path = False
+                            break
+                    
+                    if valid_path and hasattr(parent_module, sub_module_names[-1]):
+                        # Thay thế Linear bằng SVDResidualLinear
+                        setattr(parent_module, sub_module_names[-1], replace_with_svd_residual(sub_module, r))
         else:
-            # Recursively apply to child modules
+            # Đệ quy cho các module con khác
             apply_svd_residual_to_self_attn(module, r)
-    # After replacing, set requires_grad for residual components
+
+    # Set requires_grad cho các tham số SVD
     for param_name, param in model.named_parameters():
         if any(x in param_name for x in ['S_residual', 'U_residual', 'V_residual']):
             param.requires_grad = True
         else:
             param.requires_grad = False
+            
     return model
 
 
