@@ -1,5 +1,5 @@
 mode: train
-lmdb: True
+lmdb: false
 dry_run: false
 rgb_dir: './datasets/rgb'
 lmdb_dir:  './datasets/lmdb'
@@ -40,4 +40,5 @@ label_dict:
   UADFV_Real: 0
   # Roop
   roop_Real: 0
+
   roop_Fake: 1
