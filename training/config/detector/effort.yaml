@@ -4,7 +4,7 @@ log_dir: ./zhiyuanyan/logs/benchv2/icml25/release
 # model setting
 pretrained: 'no need to provide this for the effort model'
 model_name: effort   # model name
-backbone_name: vit  # backbone name
+backbone_name: Dinov2  # backbone name
 
 #backbone setting
 backbone_config:
@@ -19,8 +19,8 @@ train_dataset: [FaceForensics++]
 test_dataset: [Celeb-DF-v2, FaceShifter, DeeperForensics-1.0]
 
 compression: c23  # compression-level for videos
-train_batchSize: 32   # training batch size
-test_batchSize: 32   # test batch size
+train_batchSize: 128   # training batch size
+test_batchSize: 128   # test batch size
 workers: 8   # number of data loading workers
 frame_num: {'train': 8, 'test': 8}   # number of frames to use per video in training and testing
 resolution: 224   # resolution of output image to network
@@ -43,8 +43,8 @@ data_aug:
   quality_upper: 100
 
 # mean and std for normalization
-mean: [0.48145466, 0.4578275, 0.40821073]
-std: [0.26862954, 0.26130258, 0.27577711]
+mean: [0.485, 0.456, 0.406]
+std: [0.229, 0.224, 0.225]
 
 # optimizer config
 optimizer:
