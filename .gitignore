@@ -1,7 +1,11 @@
-﻿.idea
+.idea
 *__pycache__*
 *.vscode*
 *.pyc
 *.pth
 *.pt
 *.dat
+
+# Ignore datasets and logs
+datasets/rgb/
+logs/
