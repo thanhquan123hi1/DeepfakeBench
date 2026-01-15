@@ -36,7 +36,7 @@ def uniformity_loss(x, t=2, clip_value=1e-6):
 # ==========================================
 # 2. GenD DETECTOR
 # ==========================================
-@DETECTOR.register_module(module_name='genD')
+@DETECTOR.register_module(module_name='gend')
 class GenDDetector(nn.Module):
     def __init__(self, config=None):
         super(GenDDetector, self).__init__()
