@@ -1,0 +1,97 @@
+# log dir
+log_dir: ./zhiyuanyan/logs/benchv2/icml25/release
+
+# model setting
+pretrained: 'no need to provide this for the effort model'
+model_name: gend_effort   # [QUAN TRỌNG] Phải khớp tên trong @DETECTOR.register_module
+backbone_name: vit        # backbone name
+
+# --- [NEW] CẤU HÌNH HYBRID (GEND + EFFORT) ---
+# 1. Effort Hyperparameters
+svd_rank: 1023        # Rank cho SVD (ViT-L/14 width=1024 -> rank=1023)
+lambda_ortho: 1.0     # Loss trực giao
+lambda_svd: 1.0       # Loss giữ năng lượng
+
+# 2. GenD Hyperparameters (Theo bài báo [cite: 60])
+lambda_align: 0.1     # Alpha = 0.1
+lambda_unif: 0.5      # Beta = 0.5
+# ---------------------------------------------
+
+# backbone setting
+backbone_config:
+  mode: original
+  num_classes: 2
+  inc: 3
+  dropout: false
+
+# dataset
+all_dataset: [FaceForensics++, FF-F2F, FF-DF, FF-FS, FF-NT, FaceShifter, DeepFakeDetection, Celeb-DF-v1, Celeb-DF-v2, DFDCP, DFDC, DeeperForensics-1.0, UADFV]
+train_dataset: [FaceForensics++]
+test_dataset: [Celeb-DF-v2, FaceShifter, DeeperForensics-1.0]
+
+compression: c23
+[cite_start]train_batchSize: 128   # GenD yêu cầu batch lớn để tính Metric Learning hiệu quả [cite: 59]
+test_batchSize: 128
+workers: 8
+frame_num:
+  train: 8
+  test: 32             # Test dùng 32 frames để đánh giá video chính xác hơn
+resolution: 224
+with_mask: false
+with_landmark: false
+
+# data augmentation (Quan trọng cho GenD)
+use_data_augmentation: true
+data_aug:
+  flip_prob: 0.5
+  rotate_prob: 0.5
+  rotate_limit: [-10, 10]
+  blur_prob: 0.5
+  blur_limit: [3, 7]
+  brightness_prob: 0.5
+  brightness_limit: [-0.1, 0.1]
+  contrast_limit: [-0.1, 0.1]
+  quality_lower: 40
+  quality_upper: 100
+
+# mean and std for normalization
+mean: [0.48145466, 0.4578275, 0.40821073]
+std: [0.26862954, 0.26130258, 0.27577711]
+
+# optimizer config
+optimizer:
+  type: adam
+  adam:
+    [cite_start]lr: 0.0003          # [SỬA] Peak LR theo bài báo GenD (3e-4) 
+    beta1: 0.9
+    beta2: 0.999
+    eps: 0.00000001
+    [cite_start]weight_decay: 0.0   # [QUAN TRỌNG] GenD yêu cầu tắt weight decay để bảo toàn Hypersphere 
+    amsgrad: false
+
+# training config
+[cite_start]lr_scheduler: cosine    # [SỬA] Dùng Cosine Annealing [cite: 56]
+lr_T_max: 20            # Chu kỳ khớp với nEpochs
+[cite_start]lr_eta_min: 0.00001     # Min LR = 1e-5 
+[cite_start]nEpochs: 20             # Hội tụ sau 20 epochs [cite: 58]
+start_epoch: 0
+save_epoch: 1
+rec_iter: 100
+logdir: ./logs
+manualSeed: 1024
+save_ckpt: true
+save_feat: true
+
+# loss function
+loss_func: cross_entropy   # Loss chính vẫn là CE, các loss phụ tính ngầm trong model
+losstype: null
+
+# metric
+metric_scoring: auc
+
+# cuda
+ngpu: 1
+cuda: true
+cudnn: true
+
+save_avg: true
