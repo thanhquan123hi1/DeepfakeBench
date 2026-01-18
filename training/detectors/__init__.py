@@ -45,3 +45,4 @@ from .sia_detector import SIADetector
 from .tall_detector import TALLDetector
 from .effort_detector import EffortDetector
 from .gend_detector import GenDDetector
+from .gend_effort_detector import GenDEffortDetector
