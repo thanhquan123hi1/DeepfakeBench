@@ -47,6 +47,10 @@ parser.add_argument('--no-save_feat', dest='save_feat', action='store_false', de
 parser.add_argument("--ddp", action='store_true', default=False)
 parser.add_argument('--local_rank', type=int, default=0)
 parser.add_argument('--task_target', type=str, default="", help='specify the target of current training task')
+
+# [NEW] Thêm tham số weights_path giống test.py
+parser.add_argument('--weights_path', type=str, default=None, help='Path to pretrained weights (overrides config)')
+
 args = parser.parse_args()
 torch.cuda.set_device(args.local_rank)
 
@@ -234,15 +238,22 @@ def main():
     if config['dry_run']:
         config['nEpochs'] = 0
         config['save_feat']=False
+    
     # If arguments are provided, they will overwrite the yaml settings
     if args.train_dataset:
         config['train_dataset'] = args.train_dataset
     if args.test_dataset:
         config['test_dataset'] = args.test_dataset
+    
+    # [NEW] Logic ưu tiên: CLI Argument > YAML Config
+    if args.weights_path:
+        config['pretrained'] = args.weights_path
+        
     config['save_ckpt'] = args.save_ckpt
     config['save_feat'] = args.save_feat
     if config['lmdb']:
         config['dataset_json_folder'] = 'preprocessing/dataset_json_v3'
+    
     # create logger
     timenow=datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
     task_str = f"_{config['task_target']}" if config.get('task_target', None) is not None else ""
@@ -254,6 +265,7 @@ def main():
     logger = create_logger(os.path.join(logger_path, 'training.log'))
     logger.info('Save log to {}'.format(logger_path))
     config['ddp']= args.ddp
+    
     # print configuration
     logger.info("--------------- Configuration ---------------")
     params_string = "Parameters: \n"
@@ -274,6 +286,7 @@ def main():
             timeout=timedelta(minutes=30)
         )
         logger.addFilter(RankFilter(0))
+        
     # prepare the training data loader
     train_data_loader = prepare_training_data(config)
 
@@ -283,6 +296,41 @@ def main():
     # prepare the model (detector)
     model_class = DETECTOR[config['model_name']]
     model = model_class(config)
+
+    # --- [NEW] LOAD PRETRAINED WEIGHTS (Xử lý thông minh) ---
+    if config.get('pretrained') is not None and os.path.exists(config['pretrained']):
+        logger.info(f"🔄 Loading pretrained weights from: {config['pretrained']}")
+        try:
+            # Load checkpoint
+            checkpoint = torch.load(config['pretrained'], map_location='cpu')
+            
+            # Xử lý trường hợp checkpoint lưu cả epoch/optimizer (dict lồng nhau)
+            if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            else:
+                state_dict = checkpoint
+            
+            # Xử lý prefix 'module.' (do DataParallel/DDP)
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                name = k.replace("module.", "") 
+                new_state_dict[name] = v
+            
+            # Load với strict=False để hỗ trợ Fine-tuning (bỏ qua các layer không khớp)
+            missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+            
+            if len(missing_keys) > 0:
+                logger.warning(f"⚠️ Missing keys (initialized randomly): {missing_keys[:5]} ... total {len(missing_keys)}")
+            if len(unexpected_keys) > 0:
+                logger.warning(f"⚠️ Unexpected keys (ignored): {unexpected_keys[:5]} ... total {len(unexpected_keys)}")
+                
+            logger.info("✅ Successfully loaded pretrained weights!")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load pretrained weights: {e}")
+    else:
+        logger.info("ℹ️ No pretrained weights provided via CLI or YAML. Training from scratch.")
+    # --------------------------------------------------------
 
     # prepare the optimizer
     optimizer = choose_optimizer(model, config)
@@ -306,7 +354,10 @@ def main():
                 )
         if best_metric is not None:
             logger.info(f"===> Epoch[{epoch}] end with testing {metric_scoring}: {parse_metric_for_print(best_metric)}!")
-    logger.info("Stop Training on best Testing metric {}".format(parse_metric_for_print(best_metric))) 
+    
+    if best_metric is not None:
+        logger.info("Stop Training on best Testing metric {}".format(parse_metric_for_print(best_metric))) 
+    
     # update
     if 'svdd' in config['model_name']:
         model.update_R(epoch)
@@ -316,7 +367,6 @@ def main():
     # close the tensorboard writers
     for writer in trainer.writers.values():
         writer.close()
-
 
 
 if __name__ == '__main__':
