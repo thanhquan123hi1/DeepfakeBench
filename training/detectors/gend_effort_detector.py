@@ -235,15 +235,15 @@ class GenDEffortDetector(AbstractDetector):
         
         svd_rank = config.get('svd_rank', 1023)
         logger.info(f"Applying Effort SVD (rank={svd_rank}) to backbone...")
-        backbone = apply_svd_residual_to_self_attn(backbone, svd_rank)
+        # backbone = apply_svd_residual_to_self_attn(backbone, svd_rank)
         
         return backbone
 
     def build_loss(self, config):
         self.lambda_align = config.get('lambda_align', 1.0)
         self.lambda_unif = config.get('lambda_unif', 1.0)
-        self.lambda_ortho = config.get('lambda_ortho', 1.0)
-        self.lambda_ksv = config.get('lambda_ksv', 1.0)
+        self.lambda_ortho = 0.0 # config.get('lambda_ortho', 1.0) # Freeze Effort
+        self.lambda_ksv = 0.0 # config.get('lambda_ksv', 1.0) # Freeze Effort
         self.loss_func = nn.CrossEntropyLoss()
 
     def _setup_trainable_params(self):
@@ -265,8 +265,8 @@ class GenDEffortDetector(AbstractDetector):
         # SVD Residuals (Effort)
         for name, p in self.backbone.named_parameters():
             if any(k in name for k in ['S_residual', 'U_residual', 'V_residual']):
-                p.requires_grad = True
-                count += p.numel()
+                p.requires_grad = False # Freeze Effort
+                # count += p.numel()
         
         # Freeze SVD Bias if present
         for m in self.backbone.modules():
@@ -308,12 +308,12 @@ class GenDEffortDetector(AbstractDetector):
                     idx = torch.randperm(class_feats.size(0), device=feat.device)
                     lam = torch.rand(class_feats.size(0), 1, device=feat.device)
                     
-                    feat_interp = slerp(lam, class_feats, class_feats[idx])
+                # feat_interp = slerp(lam, class_feats, class_feats[idx])
                     
-                    feat_aug_list.append(feat_interp)
-                    label_aug_list.append(label[mask])
+                    # feat_aug_list.append(feat_interp)
+                    # label_aug_list.append(label[mask])
             
-            if len(feat_aug_list) > 0:
+            if False: # len(feat_aug_list) > 0:
                 feat_aug = torch.cat(feat_aug_list, dim=0)
                 label_aug = torch.cat(label_aug_list, dim=0)
                 feat_total = torch.cat([feat, feat_aug], dim=0)
