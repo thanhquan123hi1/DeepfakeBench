@@ -22,7 +22,7 @@ compression: c23  # compression-level for videos
 train_batchSize: 128   # training batch size
 test_batchSize: 128   # test batch size
 workers: 8   # number of data loading workers
-frame_num: {'train': 8, 'test': 8}   # number of frames to use per video in training and testing
+frame_num: {'train': 8, 'test': 32}   # number of frames to use per video in training and testing
 resolution: 224   # resolution of output image to network
 with_mask: false   # whether to include mask information in the input
 with_landmark: false   # whether to include facial landmark information in the input
@@ -86,3 +86,4 @@ cuda: true   # whether to use CUDA acceleration
 cudnn: true   # whether to use CuDNN for convolution operations
 
 save_avg: true
+
