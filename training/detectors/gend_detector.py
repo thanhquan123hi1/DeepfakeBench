@@ -6,35 +6,24 @@ from detectors import DETECTOR
 from metrics.base_metrics_class import calculate_metrics_for_train
 
 # ==========================================
-# 1. LOSS FUNCTIONS (Uniformity & Alignment)
+# 1. LOSS FUNCTIONS
 # ==========================================
-# Dựa trên file src/losses/unifalign.py của tác giả
 def alignment_loss(embeddings, labels, alpha=2):
-    """
-    Label-aware Alignment loss: Kéo các mẫu cùng nhãn lại gần nhau.
-    """
     if embeddings.size(0) < 2: return torch.tensor(0.0, device=embeddings.device)
-    
-    # Tạo ma trận so sánh nhãn (chỉ lấy cặp cùng nhãn, khác mẫu)
     labels_equal_mask = (labels[:, None] == labels[None, :]).triu(diagonal=1)
     positive_indices = torch.nonzero(labels_equal_mask, as_tuple=False)
-    
     if positive_indices.numel() == 0: return torch.tensor(0.0, device=embeddings.device)
-    
     x = embeddings[positive_indices[:, 0]]
     y = embeddings[positive_indices[:, 1]]
-    
     return (x - y).norm(p=2, dim=1).pow(alpha).mean()
 
 def uniformity_loss(x, t=2, clip_value=1e-6):
-    """
-    Uniformity loss: Đẩy các mẫu phân bố đều trên mặt cầu.
-    """
     if x.size(0) < 2: return torch.tensor(0.0, device=x.device)
-    return torch.pdist(x, p=2).pow(2).mul(-t).exp().mean().clamp(min=clip_value).log()
+    sq_dist = torch.pdist(x, p=2).pow(2)
+    return sq_dist.mul(-t).exp().mean().clamp(min=clip_value).log()
 
 # ==========================================
-# 2. GenD DETECTOR
+# 2. GenD DETECTOR (FINAL MATCHING VERSION)
 # ==========================================
 @DETECTOR.register_module(module_name='gend')
 class GenDDetector(nn.Module):
@@ -42,101 +31,92 @@ class GenDDetector(nn.Module):
         super(GenDDetector, self).__init__()
         self.config = config
         
-        # 1. Load Backbone (CLIP ViT-L/14)
-        # Lưu ý: Cập nhật đường dẫn local nếu cần
         print("Loading CLIP ViT-L/14 for GenD...")
-        self.backbone = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").vision_model
+        # Load CLIP Model
+        clip_model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
+        # Chỉ lấy phần Vision Model (Bỏ qua Text Model và Projection)
+        self.backbone = clip_model.vision_model
         
-        # 2. Setup LN-Tuning (Chỉ train LayerNorm)
         self._setup_training_params()
         
-        # 3. Classifier Head (Linear Layer)
-        # Input: 1024 (ViT-L hidden size), Output: 2 (Real/Fake)
+        # Classifier Head
         self.head = nn.Linear(1024, 2)
         
-        # 4. Loss Weights (Tham khảo từ paper/code gốc)
-        self.lambda_align = config.get('lambda_align', 1.0) if config else 1.0
-        self.lambda_unif = config.get('lambda_unif', 1.0) if config else 1.0
-        
+        # Loss config
+        self.lambda_align = config.get('lambda_align', 0.1) if config else 0.1
+        self.lambda_unif = config.get('lambda_unif', 0.5) if config else 0.5
         self.loss_ce = nn.CrossEntropyLoss()
 
     def _setup_training_params(self):
-        """
-        Đóng băng toàn bộ backbone, CHỈ mở khóa (requires_grad=True)
-        cho các lớp Layer Normalization.
-        """
-        # Đóng băng toàn bộ trước
+        # Đóng băng toàn bộ backbone
         for param in self.backbone.parameters():
             param.requires_grad = False
-            
-        # Mở khóa các lớp LayerNorm
+        
+        # Mở khóa LayerNorm (Bao gồm cả post_layernorm trong pooler_output)
         trainable_params = 0
         for name, param in self.backbone.named_parameters():
-            # CLIP dùng 'layer_norm' hoặc 'layernorm' trong tên biến
             if 'layer_norm' in name or 'layernorm' in name:
                 param.requires_grad = True
                 trainable_params += param.numel()
-        
-        print(f"GenD Initialized. Trainable params (LayerNorm only): {trainable_params}")
+        print(f"GenD Backbone Initialized. Trainable params (LN): {trainable_params}")
 
     def features(self, data_dict: dict) -> torch.tensor:
-        # Lấy feature từ backbone (CLS token / pooler_output)
-        # CLIP vision model trả về pooler_output (đã qua LN + projection) hoặc last_hidden_state
-        # GenD dùng CLS token sau khi qua encoder
+        """
+        Dùng pooler_output theo đúng source code gốc.
+        Trong HF, pooler_output = CLS Token + Post LayerNorm.
+        """
+        # Không cần output_hidden_states=True nữa vì pooler_output là mặc định
         outputs = self.backbone(data_dict['image'])
-        feat = outputs.pooler_output # Shape: [B, 1024]
         
-        # Quan trọng: GenD yêu cầu L2 Normalization feature trước khi vào classifier
-        feat = F.normalize(feat, p=2, dim=1)
+        # Lấy pooler_output (Shape: [Batch, 1024])
+        # Đây chính là CLS token đã qua lớp LN cuối cùng.
+        feat = outputs.pooler_output 
         return feat
 
     def classifier(self, features: torch.tensor) -> torch.tensor:
-        # Features đã được normalize ở bước trên
         return self.head(features)
 
     def forward(self, data_dict: dict, inference=False) -> dict:
-        # 1. Extract Features (Normalized)
-        features = self.features(data_dict)
+        # 1. Raw Features (Từ pooler_output)
+        raw_features = self.features(data_dict)
         
-        # 2. Classification
-        pred = self.classifier(features)
+        # 2. Luồng Classification: Dùng Raw Features (Khớp Effort/Checkpoint)
         
-        # 3. Probability
+        
+        # 3. Luồng Metric Learning: Dùng Normalized Features (Khớp Paper)
+        norm_features = F.normalize(raw_features, p=2, dim=1)
+        pred = self.classifier(norm_features)
+        
+        # 4. Xác suất
         prob = torch.softmax(pred, dim=1)[:, 1]
         
-        pred_dict = {'cls': pred, 'prob': prob, 'feat': features}
-        return pred_dict
+        return {'cls': pred, 'prob': prob, 'feat': raw_features, 'feat_norm': norm_features}
 
     def get_losses(self, data_dict: dict, pred_dict: dict) -> dict:
         label = data_dict['label']
         pred = pred_dict['cls']
-        features = pred_dict['feat'] # Features này đã L2-normalized
+        feat_norm = pred_dict['feat_norm'] 
         
-        # 1. Cross Entropy Loss
         loss_cls = self.loss_ce(pred, label)
         
-        # 2. Metric Learning Losses (Chỉ tính khi training)
         loss_align = torch.tensor(0.0, device=pred.device)
         loss_unif = torch.tensor(0.0, device=pred.device)
         
         if self.training:
-            loss_align = alignment_loss(features, label)
-            loss_unif = uniformity_loss(features)
+            loss_align = alignment_loss(feat_norm, label)
+            loss_unif = uniformity_loss(feat_norm)
             
-        # Tổng hợp Loss
         overall_loss = loss_cls + (self.lambda_align * loss_align) + (self.lambda_unif * loss_unif)
         
-        loss_dict = {
+        return {
             'overall': overall_loss,
             'ce_loss': loss_cls,
             'align_loss': loss_align,
             'unif_loss': loss_unif
         }
-        return loss_dict
 
     def get_train_metrics(self, data_dict: dict, pred_dict: dict) -> dict:
         label = data_dict['label']
         pred = pred_dict['cls']
         auc, eer, acc, ap = calculate_metrics_for_train(label.detach(), pred.detach())
-        metric_batch_dict = {'acc': acc, 'auc': auc, 'eer': eer, 'ap': ap}
-        return metric_batch_dict
+        return {'acc': acc, 'auc': auc, 'eer': eer, 'ap': ap}
