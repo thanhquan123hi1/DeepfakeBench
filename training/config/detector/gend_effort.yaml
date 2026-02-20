@@ -1,24 +1,32 @@
+# =========================
+# GenD-Effort HYBRID FINETUNE (from GenD weights)
+# =========================
+
 # log dir
-log_dir: ./zhiyuanyan/logs/benchv2/icml25/release
+log_dir: /kaggle/tmp/logs
 
 # model setting
-pretrained: 'no need to provide this for the effort model'
+# -> trỏ tới checkpoint GenD đã train (state_dict)
+pretrained: /kaggle/working/checkpoints/gend_best.pth
 model_name: gend_effort
 backbone_name: vit
 
 # --- HYBRID PARAMETERS ---
+# Effort/SVD residual
 svd_rank: 1023
-lambda_ortho: 1.0
-lambda_svd: 1.0
-lambda_align: 0.1
-lambda_unif: 0.5
+
+# Loss weights (match your detector keys)
+lambda_ortho: 2.0  
+lambda_ksv: 2.0
+lambda_align: 1.0  
+lambda_unif: 1.0
 
 # backbone setting
 backbone_config:
-  mode: original
-  num_classes: 2
-  inc: 3
-  dropout: false
+  mode: original
+  num_classes: 2
+  inc: 3
+  dropout: false
 
 # dataset
 all_dataset: [FaceForensics++, FF-F2F, FF-DF, FF-FS, FF-NT, FaceShifter, DeepFakeDetection, Celeb-DF-v1, Celeb-DF-v2, DFDCP, DFDC, DeeperForensics-1.0, UADFV]
@@ -30,8 +38,8 @@ train_batchSize: 128
 test_batchSize: 128
 workers: 8
 frame_num:
-  train: 8
-  test: 32
+  train: 8
+  test: 32
 resolution: 224
 with_mask: false
 with_landmark: false
@@ -39,37 +47,45 @@ with_landmark: false
 # data augmentation
 use_data_augmentation: true
 data_aug:
-  flip_prob: 0.5
-  rotate_prob: 0.5
-  rotate_limit: [-10, 10]
-  blur_prob: 0.5
-  blur_limit: [3, 7]
-  brightness_prob: 0.5
-  brightness_limit: [-0.1, 0.1]
-  contrast_limit: [-0.1, 0.1]
-  quality_lower: 40
-  quality_upper: 100
+  flip_prob: 0.5
+  rotate_prob: 0.5
+  rotate_limit: [-10, 10]
+  blur_prob: 0.3
+  blur_limit: [3, 7]
+  brightness_prob: 0.5
+  brightness_limit: [-0.1, 0.1]
+  contrast_limit: [-0.1, 0.1]
+  quality_lower: 40
+  quality_upper: 100
 
-# mean and std for normalization
+
+# CLIP mean/std
 mean: [0.48145466, 0.4578275, 0.40821073]
-std: [0.26862954, 0.26130258, 0.27577711]
+std:  [0.26862954, 0.26130258, 0.27577711]
 
 # optimizer config
+# finetune ít tham số (LN + residual + head) -> thường ổn hơn khi giảm lr chút
 optimizer:
-  type: adam
-  adam:
-    lr: 0.0003
-    beta1: 0.9
-    beta2: 0.999
-    eps: 0.00000001
-    weight_decay: 0.0
-    amsgrad: false
-
+  type: sam          # Kích hoạt SAM
+  base_type: sgd     # SAM hoạt động tốt nhất với SGD nền tảng
+  
+  # Cấu hình riêng cho SAM
+  sam:
+    lr: 0.001        # SAM cho phép LR lớn hơn (1e-3) giúp thoát khỏi local minima
+    momentum: 0.9
+    weight_decay: 0.0005
+    rho: 0.05        # Bán kính vùng phẳng (0.05 là chuẩn vàng)
+    
+  # Giữ lại config cũ phòng hờ
+  adam:
+    lr: 0.00005
+    weight_decay: 0.0
+    amsgrad: false
 # training config
 lr_scheduler: cosine
-lr_T_max: 20
+lr_T_max: 10
 lr_eta_min: 0.00001
-nEpochs: 20
+nEpochs: 15
 start_epoch: 0
 save_epoch: 1
 rec_iter: 100
@@ -77,6 +93,7 @@ logdir: ./logs
 manualSeed: 1024
 save_ckpt: true
 save_feat: true
+save_avg: true
 
 # loss function
 loss_func: cross_entropy
@@ -89,5 +106,4 @@ metric_scoring: auc
 ngpu: 1
 cuda: true
 cudnn: true
-
-save_avg: true
+còn yaml này đã  ok chưa
