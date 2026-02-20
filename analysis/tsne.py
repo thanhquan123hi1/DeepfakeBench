@@ -1,68 +1,101 @@
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.manifold import TSNE
 import pickle
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
 
-color_map = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple']
-label_dict = {
-        0: 'FF_Real',    1: 'Deepfakes', 2: 'Face2Face', 3: 'FaceSwap', 4: 'NeuralTextures', 
-    }
-
-def tsne_draw(x_transformed, numerical_labels, ax, epoch=0, log='', detector_name=None):
-    labels = [label_dict[label] for label in numerical_labels]
-
-    tsne_df = pd.DataFrame(x_transformed, columns=['X', 'Y'])
-    tsne_df["Targets"] = labels
-    tsne_df["NumericTargets"] = numerical_labels
-    tsne_df.sort_values(by="NumericTargets", inplace=True)
-    
-    marker_list = ['*' if label == 0 else 'o' for label in tsne_df["NumericTargets"]]
-
-    for _x, _y, _c, _m in zip(tsne_df['X'], tsne_df['Y'], [color_map[i] for i in tsne_df["NumericTargets"]], marker_list):
-        ax.scatter(_x, _y, color=_c, s=30, alpha=0.7, marker=_m)
-
-    print(f'epoch{epoch} ' + log)
-    ax.axis('off')
-
-
+# -------------------------
+# 1) INPUT PKL PATHS
+# -------------------------
 detector_name_list = [
-    '/mntcephfs/lab_data/zhiyuanyan/benchmark_results/tsne/tsne_dict_xception_0_270.pkl',
-    '/mntcephfs/lab_data/zhiyuanyan/benchmark_results/tsne/tsne_dict_xception_0.pkl',
+    '/kaggle/tmp/tsne_pkls/hybrid/tsne_dict_gend_effort_FaceForensics++.pkl',  # SEEN
+    '/kaggle/tmp/tsne_pkls/hybrid/tsne_dict_gend_effort_Celeb-DF-v2.pkl',      # UNSEEN
 ]
 
-tsne = TSNE(n_components=2, perplexity=20, random_state=1024, learning_rate=250)
-fig, axs = plt.subplots(1, 2, figsize=(20,10))
+# -------------------------
+# 2) LOAD PKL
+# -------------------------
+def load_pkl(path):
+    with open(path, "rb") as f:
+        d = pickle.load(f)
+    feat = np.asarray(d["feat"]).reshape(len(d["feat"]), -1)
+    label = np.asarray(d["label"]).astype(int)  # 0 real, 1 fake
+    return feat, label
 
-for i, tsne_dict in enumerate(detector_name_list):
-    print(f'Processing {tsne_dict}...')
-    name = str(tsne_dict.split('/')[-1].split('.')[0].split('_')[-1])
-    with open(tsne_dict, 'rb') as f:
-        tsne_dict = pickle.load(f)
-    
-    feat = tsne_dict['feat'].reshape((tsne_dict['feat'].shape[0], -1))
-    label_spe = tsne_dict['label_spe']
+feat_seen, label_seen = load_pkl(detector_name_list[0])
+feat_unseen, label_unseen = load_pkl(detector_name_list[1])
 
-    label_0_indices = np.where(label_spe == 0)[0][:2500]
-    other_label_indices = np.where(label_spe != 0)[0]
-    num_samples = len(label_0_indices)
-    other_label_indices_sampled = np.random.choice(other_label_indices, size=num_samples, replace=False)
-    sampled_indices = np.concatenate((label_0_indices, other_label_indices_sampled))
-    np.random.shuffle(sampled_indices)
+# Optional normalize (giữ như code gốc)
+def l2_normalize(x):
+    return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-8)
 
-    feat = feat[sampled_indices]
-    label_spe = label_spe[sampled_indices]
-    feat_transformed = tsne.fit_transform(feat)
-    scatter = tsne_draw(feat_transformed, label_spe, ax=axs[i], epoch=0, log='share_in_specific', detector_name='xception')
+feat_seen = l2_normalize(feat_seen)
+feat_unseen = l2_normalize(feat_unseen)
 
-    # # give a title to the subplot
-    # axs[i].set_title(f'Xception with {name} frames')  
+# -------------------------
+# 3) CONCAT
+# -------------------------
+feat = np.concatenate([feat_seen, feat_unseen], axis=0)
 
-# create a legend for the whole figure after the loop
-handles = [plt.Line2D([0], [0], marker='*', color='w', markerfacecolor=color_map[i], markersize=10) if i == 0 else plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color_map[i], markersize=10) for i in range(5)]
-labels = [label_dict[i] for i in range(5)]
-# fig.legend(handles, labels, title="Classes", loc="upper right", fontsize=14)
+rf_label = np.concatenate([label_seen, label_unseen], axis=0).astype(int)
+seen_flag = np.concatenate([
+    np.ones(len(label_seen), dtype=int),
+    np.zeros(len(label_unseen), dtype=int)
+])
 
-plt.tight_layout()
-plt.savefig('xcep_4vs270_3.png')
+# -------------------------
+# 4) BUILD 4 GROUPS
+# -------------------------
+group = np.zeros_like(rf_label, dtype=int)
+group[(seen_flag == 1) & (rf_label == 0)] = 0  # Seen Real
+group[(seen_flag == 1) & (rf_label == 1)] = 1  # Seen Fake
+group[(seen_flag == 0) & (rf_label == 0)] = 2  # Unseen Real
+group[(seen_flag == 0) & (rf_label == 1)] = 3  # Unseen Fake
+
+names   = ["Seen Real", "Seen Fake", "Unseen Real", "Unseen Fake"]
+colors  = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+markers = ["*", "o", "o", "*"]
+
+# -------------------------
+# 5) TSNE (GIỮ NGUYÊN CODE GỐC)
+# -------------------------
+tsne = TSNE(
+    n_components=2,
+    perplexity=30,
+    learning_rate=250,
+    random_state=1024
+)
+
+x2d = tsne.fit_transform(feat)
+
+# -------------------------
+# 6) PLOT (đẹp hơn nhưng không đổi layout)
+# -------------------------
+fig, ax = plt.subplots(figsize=(14, 9))
+fig.patch.set_facecolor("white")
+ax.set_facecolor("white")
+
+# vẽ theo layer để nhìn rõ hơn
+plot_order = [2, 3, 0, 1]  # Unseen Real, Unseen Fake, Seen Real, Seen Fake
+
+size_map  = {0: 26, 1: 26, 2: 20, 3: 20}
+alpha_map = {0: 0.85, 1: 0.90, 2: 0.80, 3: 0.80}
+
+for g in plot_order:
+    idx = np.where(group == g)[0]
+    ax.scatter(
+        x2d[idx, 0],
+        x2d[idx, 1],
+        s=size_map[g],
+        alpha=alpha_map[g],
+        c=colors[g],
+        marker=markers[g],
+        linewidths=0,
+        label=names[g]
+    )
+
+ax.legend(loc="upper right", fontsize=18, frameon=True, markerscale=1.2)
+ax.axis("off")
+
+plt.tight_layout(pad=0.6)
+plt.savefig("tsne_seen_unseen_clean.png", dpi=300, bbox_inches="tight")
+print("Saved: tsne_seen_unseen_clean.png")
