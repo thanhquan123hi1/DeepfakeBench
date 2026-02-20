@@ -60,15 +60,33 @@ class CLIPDetector(AbstractDetector):
         super().__init__()
         self.config = config
         self.backbone = self.build_backbone(config)
+        
+        # Đảm bảo toàn bộ trọng số của backbone được fine-tune (unfrozen)
+        for param in self.backbone.parameters():
+            param.requires_grad = True
+            
         self.head = nn.Linear(768, 2)
         self.loss_func = self.build_loss(config)
+        
+        # In ra thông tin số lượng trọng số thay đổi
+        self.print_trainable_parameters()
+        
+    def print_trainable_parameters(self):
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in self.parameters())
+        
+        print(f"\n{'='*45}")
+        print(f"🔥 FULL FINE-TUNING CLIP ACTIVATED 🔥")
+        print(f"Total Parameters:      {total_params:,}")
+        print(f"Trainable Parameters:  {trainable_params:,}")
+        print(f"Percentage Trainable:  {100 * trainable_params / total_params:.2f}%")
+        print(f"{'='*45}\n")
         
     def build_backbone(self, config):
         # prepare the backbone
         _, backbone = get_clip_visual(model_name="openai/clip-vit-base-patch16")
         return backbone
 
-        
     def build_loss(self, config):
         # prepare the loss function
         loss_class = LOSSFUNC[config['loss_func']]
