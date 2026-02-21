@@ -2,34 +2,34 @@
 log_dir: ./zhiyuanyan/logs/benchv2/icml25/release
 
 # model setting
-pretrained: 'no need to provide this for the effort model'
-model_name: gend   # model name
-backbone_name: vit  # backbone name
+model_name: gend
+backbone_name: vit_large_patch14_clip # Sử dụng CLIP ViT-L/14 theo bài báo [cite: 45]
 
-#backbone setting
+# backbone setting
 backbone_config:
   mode: original
   num_classes: 2
   inc: 3
   dropout: false
+  # Quan trọng: Chỉ fine-tune LayerNorm (0.03% params) [cite: 3, 50]
 
 # dataset
 all_dataset: [FaceForensics++, FF-F2F, FF-DF, FF-FS, FF-NT, FaceShifter, DeepFakeDetection, Celeb-DF-v1, Celeb-DF-v2, DFDCP, DFDC, DeeperForensics-1.0, UADFV]
 train_dataset: [FaceForensics++]
+# Bài báo khuyến nghị dùng Paired Data (Real-Fake từ cùng 1 video nguồn) để đạt hiệu quả cao nhất [cite: 5, 22, 75, 76]
 test_dataset: [Celeb-DF-v2, FaceShifter, DeeperForensics-1.0]
 
-compression: c23  # compression-level for videos
-train_batchSize: 128   # training batch size
-test_batchSize: 128   # test batch size
-workers: 8   # number of data loading workers
-frame_num: {'train': 8, 'test': 32}   # number of frames to use per video in training and testing
-resolution: 224   # resolution of output image to network
-with_mask: false   # whether to include mask information in the input
-with_landmark: false   # whether to include facial landmark information in the input
+compression: c23
+train_batchSize: 128 # Khớp với bài báo [cite: 59]
+test_batchSize: 128
+workers: 8
+frame_num: {'train': 8, 'test': 32} # Test sử dụng 32 frames để đạt AUROC tốt nhất [cite: 62, 66]
+resolution: 224
+with_mask: false
+with_landmark: false
 
-
-# data augmentation
-use_data_augmentation: true  # Add this flag to enable/disable data augmentation
+# data augmentation [cite: 73]
+use_data_augmentation: true
 data_aug:
   flip_prob: 0.5
   rotate_prob: 0.5
@@ -41,49 +41,54 @@ data_aug:
   contrast_limit: [-0.1, 0.1]
   quality_lower: 40
   quality_upper: 100
+  # Lưu ý bài báo có nhắc đến JPEG compression augmentation [cite: 73]
 
-# mean and std for normalization
+# mean and std cho CLIP [cite: 45, 60]
 mean: [0.48145466, 0.4578275, 0.40821073]
 std: [0.26862954, 0.26130258, 0.27577711]
 
-# optimizer config
+# optimizer config [cite: 55]
 optimizer:
-  # choose between 'adam' and 'sgd'
   type: adam
   adam:
-    lr: 0.0002  # learning rate
-    beta1: 0.9  # beta1 for Adam optimizer
-    beta2: 0.999 # beta2 for Adam optimizer
-    eps: 0.00000001  # epsilon for Adam optimizer
-    weight_decay: 0.0005  # weight decay for regularization
+    lr: 0.0003 # Peak learning rate là 3e-4 
+    beta1: 0.9
+    beta2: 0.999
+    eps: 0.00000001
+    weight_decay: 0.0 # Bài báo ghi rõ: "without weight decay" [cite: 55]
     amsgrad: false
-  sgd:
-    lr: 0.0002  # learning rate
-    momentum: 0.9  # momentum for SGD optimizer
-    weight_decay: 0.0005  # weight decay for regularization
 
 # training config
-lr_scheduler: null   # learning rate scheduler
-nEpochs: 10   # number of epochs to train for
-start_epoch: 0   # manual epoch number (useful for restarts)
-save_epoch: 1   # interval epochs for saving models
-rec_iter: 100   # interval iterations for recording
-logdir: ./logs   # folder to output images and logs
-manualSeed: 1024   # manual seed for random number generation
-save_ckpt: true   # whether to save checkpoint
-save_feat: true   # whether to save features
+# Bài báo sử dụng Cosine cyclic rule với 1 epoch warm-up [cite: 56, 57]
+lr_scheduler: cosine
+warmup_epochs: 1 # Warmup từ 1e-5 lên 3e-4 trong 1 epoch 
+lr_T_max: 20         # Chu kỳ giảm LR kéo dài ra
+lr_eta_min: 0.00001
+nEpochs: 20          # Tăng từ 15 lên 20 để LayerNorm và SVD kịp phối hợp
+start_epoch: 0
 
-# loss function
-loss_func: cross_entropy   # loss function to use
-losstype: null
+
+nEpochs: 20 # Train trong 2 cycles (tổng 20 epochs) [cite: 58]
+start_epoch: 0
+save_epoch: 1
+rec_iter: 100
+manualSeed: 1024 # Bài báo lặp lại 5 lần với các seed khác nhau [cite: 89, 95]
+save_ckpt: true
+save_feat: true
+
+# loss function [cite: 51]
+# L = L_CE + alpha*L_align + beta*L_unif
+loss_func: cross_entropy
+
+lambda_align: 0.1 # Hệ số alpha cho CLIP ViT-L/14 [cite: 60]
+lambda_unif: 0.5 # Hệ số beta cho CLIP ViT-L/14 [cite: 60]
 
 # metric
-metric_scoring: auc   # metric for evaluation (auc, acc, eer, ap)
+metric_scoring: auc # AUROC là metric chính [cite: 4, 99]
 
 # cuda
-ngpu: 1   # number of GPUs to use
-cuda: true   # whether to use CUDA acceleration
-cudnn: true   # whether to use CuDNN for convolution operations
+ngpu: 1
+cuda: true
+cudnn: true
 
 save_avg: true
-
