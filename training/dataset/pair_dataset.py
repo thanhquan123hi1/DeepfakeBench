@@ -1,150 +1,86 @@
-'''
-# author: Zhiyuan Yan
-# email: zhiyuanyan@link.cuhk.edu.cn
-# date: 2023-03-30
-
-The code is designed for scenarios such as disentanglement-based methods where it is necessary to ensure an equal number of positive and negative samples.
-'''
-
 import torch
 import random
 import numpy as np
+import os
 from dataset.abstract_dataset import DeepfakeAbstractBaseDataset
-
 
 class pairDataset(DeepfakeAbstractBaseDataset):
     def __init__(self, config=None, mode='train'):
         super().__init__(config, mode)
         
-        # Get real and fake image lists
-        # Fix the label of real images to be 0 and fake images to be 1
+        # 1. Phân loại danh sách ảnh Real (0) và Fake (1)
         self.fake_imglist = [(img, label, 1) for img, label in zip(self.image_list, self.label_list) if label != 0]
         self.real_imglist = [(img, label, 0) for img, label in zip(self.image_list, self.label_list) if label == 0]
 
+        # 2. Xây dựng Real Pool theo Frame (Khắc phục lỗi dấu \)
+        self.real_pool = {}
+        for img_path, spe_label, label in self.real_imglist:
+            # CHUẨN HÓA PATH: Ép mọi dấu \ thành /
+            clean_path = img_path.replace('\\', '/')
+            parts = clean_path.split('/')
+            
+            frame_name = parts[-1]   # Ví dụ: '000.png'
+            video_id = parts[-2]     # Ví dụ: '188'
+            
+            if video_id not in self.real_pool:
+                self.real_pool[video_id] = {}
+            self.real_pool[video_id][frame_name] = (img_path, spe_label, label)
+
     def __getitem__(self, index, norm=True):
-        # Get the fake and real image paths and labels
         fake_image_path, fake_spe_label, fake_label = self.fake_imglist[index]
-        real_index = random.randint(0, len(self.real_imglist) - 1)  # Randomly select a real image
-        real_image_path, real_spe_label, real_label = self.real_imglist[real_index]
-
-        # Get the mask and landmark paths for fake and real images
-        fake_mask_path = fake_image_path.replace('frames', 'masks')
-        fake_landmark_path = fake_image_path.replace('frames', 'landmarks').replace('.png', '.npy')
         
-        real_mask_path = real_image_path.replace('frames', 'masks')
-        real_landmark_path = real_image_path.replace('frames', 'landmarks').replace('.png', '.npy')
-
-        # Load the fake and real images
-        fake_image = self.load_rgb(fake_image_path)
-        real_image = self.load_rgb(real_image_path)
-
-        fake_image = np.array(fake_image)  # Convert to numpy array for data augmentation
-        real_image = np.array(real_image)  # Convert to numpy array for data augmentation
-
-        # Load mask and landmark (if needed) for fake and real images
-        if self.config['with_mask']:
-            fake_mask = self.load_mask(fake_mask_path)
-            real_mask = self.load_mask(real_mask_path)
+        # CHUẨN HÓA PATH FAKE
+        clean_fake_path = fake_image_path.replace('\\', '/')
+        parts = clean_fake_path.split('/')
+        frame_name = parts[-1]
+        fake_video_id = parts[-2]
+        
+        # Trích xuất ID nguồn (Ví dụ '635_642' -> '635')
+        source_real_id = fake_video_id.split('_')[0] if '_' in fake_video_id else fake_video_id
+        
+        # Logic tìm ảnh Real
+        if source_real_id in self.real_pool:
+            if frame_name in self.real_pool[source_real_id]:
+                real_match = self.real_pool[source_real_id][frame_name]
+            else:
+                real_match = random.choice(list(self.real_pool[source_real_id].values()))
+            real_image_path, real_spe_label, real_label = real_match
         else:
-            fake_mask, real_mask = None, None
+            # Nếu code chạy vào đây nghĩa là ID không khớp, ta sẽ in cảnh báo (tùy chọn)
+            # print(f"⚠️ Không tìm thấy source {source_real_id} cho fake video {fake_video_id}")
+            real_index = random.randint(0, len(self.real_imglist) - 1)
+            real_image_path, real_spe_label, real_label = self.real_imglist[real_index]
 
-        if self.config['with_landmark']:
-            fake_landmarks = self.load_landmark(fake_landmark_path)
-            real_landmarks = self.load_landmark(real_landmark_path)
-        else:
-            fake_landmarks, real_landmarks = None, None
+        # Load ảnh
+        fake_image = np.array(self.load_rgb(fake_image_path))
+        real_image = np.array(self.load_rgb(real_image_path))
 
-        # Do transforms for fake and real images
-        fake_image_trans, fake_landmarks_trans, fake_mask_trans = self.data_aug(fake_image, fake_landmarks, fake_mask)
-        real_image_trans, real_landmarks_trans, real_mask_trans = self.data_aug(real_image, real_landmarks, real_mask)
+        # Data Augmentation
+        fake_trans, _, _ = self.data_aug(fake_image, None, None)
+        real_trans, _, _ = self.data_aug(real_image, None, None)
 
         if not norm:
-            return {"fake": (fake_image_trans, fake_label), 
-                    "real": (real_image_trans, real_label)}
+            return {"fake": (fake_trans, fake_label), "real": (real_trans, real_label)}
 
-        # To tensor and normalize for fake and real images
-        fake_image_trans = self.normalize(self.to_tensor(fake_image_trans))
-        real_image_trans = self.normalize(self.to_tensor(real_image_trans))
+        # Normalize to Tensor
+        fake_trans = self.normalize(self.to_tensor(fake_trans))
+        real_trans = self.normalize(self.to_tensor(real_trans))
 
-        # Convert landmarks and masks to tensors if they exist
-        if self.config['with_landmark']:
-            fake_landmarks_trans = torch.from_numpy(fake_landmarks_trans)
-            real_landmarks_trans = torch.from_numpy(real_landmarks_trans)
-        if self.config['with_mask']:
-            fake_mask_trans = torch.from_numpy(fake_mask_trans)
-            real_mask_trans = torch.from_numpy(real_mask_trans)
-
-        return {"fake": (fake_image_trans, fake_label, fake_spe_label, fake_landmarks_trans, fake_mask_trans), 
-                "real": (real_image_trans, real_label, real_spe_label, real_landmarks_trans, real_mask_trans)}
+        return {
+            "fake": (fake_trans, fake_label, fake_spe_label, None, None), 
+            "real": (real_trans, real_label, real_spe_label, None, None)
+        }
 
     def __len__(self):
         return len(self.fake_imglist)
 
     @staticmethod
     def collate_fn(batch):
-        """
-        Collate a batch of data points.
+        f_imgs, f_labels, f_spe_labels, _, _ = zip(*[data["fake"] for data in batch])
+        r_imgs, r_labels, r_spe_labels, _, _ = zip(*[data["real"] for data in batch])
 
-        Args:
-            batch (list): A list of tuples containing the image tensor, the label tensor,
-                        the landmark tensor, and the mask tensor.
+        images = torch.cat([torch.stack(r_imgs), torch.stack(f_imgs)], dim=0)
+        labels = torch.cat([torch.LongTensor(r_labels), torch.LongTensor(f_labels)], dim=0)
+        spe_labels = torch.cat([torch.LongTensor(r_spe_labels), torch.LongTensor(f_spe_labels)], dim=0)
 
-        Returns:
-            A tuple containing the image tensor, the label tensor, the landmark tensor,
-            and the mask tensor.
-        """
-        # Separate the image, label, landmark, and mask tensors for fake and real data
-        fake_images, fake_labels, fake_spe_labels, fake_landmarks, fake_masks = zip(*[data["fake"] for data in batch])
-        real_images, real_labels, real_spe_labels, real_landmarks, real_masks = zip(*[data["real"] for data in batch])
-
-        # Stack the image, label, landmark, and mask tensors for fake and real data
-        fake_images = torch.stack(fake_images, dim=0)
-        fake_labels = torch.LongTensor(fake_labels)
-        fake_spe_labels = torch.LongTensor(fake_spe_labels)
-        real_images = torch.stack(real_images, dim=0)
-        real_labels = torch.LongTensor(real_labels)
-        real_spe_labels = torch.LongTensor(real_spe_labels)
-
-        # Special case for landmarks and masks if they are None
-        if fake_landmarks[0] is not None:
-            fake_landmarks = torch.stack(fake_landmarks, dim=0)
-        else:
-            fake_landmarks = None
-        if real_landmarks[0] is not None:
-            real_landmarks = torch.stack(real_landmarks, dim=0)
-        else:
-            real_landmarks = None
-
-        if fake_masks[0] is not None:
-            fake_masks = torch.stack(fake_masks, dim=0)
-        else:
-            fake_masks = None
-        if real_masks[0] is not None:
-            real_masks = torch.stack(real_masks, dim=0)
-        else:
-            real_masks = None
-
-        # Combine the fake and real tensors and create a dictionary of the tensors
-        images = torch.cat([real_images, fake_images], dim=0)
-        labels = torch.cat([real_labels, fake_labels], dim=0)
-        spe_labels = torch.cat([real_spe_labels, fake_spe_labels], dim=0)
-        
-        if fake_landmarks is not None and real_landmarks is not None:
-            landmarks = torch.cat([real_landmarks, fake_landmarks], dim=0)
-        else:
-            landmarks = None
-
-        if fake_masks is not None and real_masks is not None:
-            masks = torch.cat([real_masks, fake_masks], dim=0)
-        else:
-            masks = None
-
-        data_dict = {
-            'image': images,
-            'label': labels,
-            'label_spe': spe_labels,
-            'landmark': landmarks,
-            'mask': masks
-        }
-        return data_dict
-
+        return {'image': images, 'label': labels, 'label_spe': spe_labels}
