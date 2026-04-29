@@ -1,0 +1,92 @@
+# log dir 
+log_dir: ./logs/forada_release
+
+# model setting
+model_name: forada
+clip_model_name: "ViT-L/14"
+clip_download_root: "/data/weights" # Bạn có thể đổi đường dẫn này về nơi lưu model CLIP của mình
+vit_name: 'vit_tiny_patch16_224'
+
+# Adapter & Modules settings
+num_quires: 128
+fusion_map: {1: 1, 2: 8, 3: 15}
+mlp_dim: 256
+mlp_out_dim: 128
+head_num: 16
+
+# Loss Weights settings (Phản ánh "10 * loss1 + 200 * loss_mse + 20 * loss_intra + 10 * loss_clip")
+lambda_cls: 10.0
+lambda_mse: 200.0
+lambda_intra: 20.0
+lambda_clip: 10.0
+
+# dataset
+dataset_type: pair
+all_dataset: [FaceForensics++, FF-F2F, FF-DF, FF-FS, FF-NT, FaceShifter, DeepFakeDetection, Celeb-DF-v1, Celeb-DF-v2, DFDCP, DFDC, DeeperForensics-1.0, UADFV]
+train_dataset: [FaceForensics++]
+test_dataset: [FaceForensics++]
+
+dataset_json_folder: '/data/dataset/dataset_json'
+compression: c23
+train_batchSize: 16
+test_batchSize: 128
+workers: 8
+
+frame_num:
+  train: 32
+  test: 32
+
+resolution: 256
+with_mask: true
+with_xray: true
+with_patch_labels: true
+with_landmark: false
+
+# data augmentation
+use_data_augmentation: false
+data_aug:
+  flip_prob: 0.5
+  rotate_prob: 0.5
+  rotate_limit: [-10, 10]
+  blur_prob: 0.5
+  blur_limit: [3, 7]
+  brightness_prob: 0.5
+  brightness_limit: [-0.1, 0.1]
+  contrast_limit: [-0.1, 0.1]
+  quality_lower: 40
+  quality_upper: 100
+
+# mean and std for normalization
+mean: [0.48145466, 0.4578275, 0.40821073]
+std: [0.26862954, 0.26130258, 0.27577711]
+
+# optimizer config
+optimizer:
+  type: adam
+  adam:
+    lr: 0.0002
+    beta1: 0.9
+    beta2: 0.999
+    eps: 0.00000001
+    weight_decay: 0.0005
+    amsgrad: false
+
+# training config
+lr_scheduler: null
+nEpochs: 60
+start_epoch: 0
+save_epoch: 2
+rec_iter: 100
+manualSeed: 1020
+save_ckpt: true
+save_feat: false
+save_avg: true
+
+# metric
+metric_scoring: auc
+
+# cuda
+device: 'cuda:0'
+ngpu: 1
+cuda: true
+cudnn: true
