@@ -31,7 +31,10 @@ from optimizor.LinearLR import LinearDecayLR
 
 from trainer.trainer import Trainer
 from detectors import DETECTOR
-from dataset import *
+from dataset.abstract_dataset import DeepfakeAbstractBaseDataset
+from dataset.iid_dataset import IIDDataset
+from dataset.pair_dataset import pairDataset
+from dataset.lrl_dataset import LRLDataset
 from metrics.utils import parse_metric_for_print
 from logger import create_logger, RankFilter
 
@@ -59,7 +62,7 @@ def init_seed(config):
     if config['manualSeed'] is None:
         config['manualSeed'] = random.randint(1, 10000)
     random.seed(config['manualSeed'])
-    if config['cuda']:
+    if config.get('cuda', False):
         torch.manual_seed(config['manualSeed'])
         torch.cuda.manual_seed_all(config['manualSeed'])
 
@@ -67,6 +70,10 @@ def init_seed(config):
 def prepare_training_data(config):
     # Only use the blending dataset class in training
     if 'dataset_type' in config and config['dataset_type'] == 'blend':
+        from dataset.ff_blend import FFBlendDataset
+        from dataset.fwa_blend import FWABlendDataset
+        from dataset.sbi_dataset import SBIDataset
+        from dataset.lsda_dataset import LSDADataset
         if config['model_name'] == 'facexray':
             train_set = FFBlendDataset(config)
         elif config['model_name'] == 'fwa':
@@ -84,6 +91,7 @@ def prepare_training_data(config):
     elif 'dataset_type' in config and config['dataset_type'] == 'iid':
         train_set = IIDDataset(config, mode='train')
     elif 'dataset_type' in config and config['dataset_type'] == 'I2G':
+        from dataset.I2G_dataset import I2GDataset
         train_set = I2GDataset(config, mode='train')
     elif 'dataset_type' in config and config['dataset_type'] == 'lrl':
         train_set = LRLDataset(config, mode='train')
@@ -162,29 +170,43 @@ def prepare_testing_data(config):
 def choose_optimizer(model, config):
     opt_name = config['optimizer']['type']
     if opt_name == 'sgd':
+        optimizer_config = config['optimizer'][opt_name]
+        optimizer_config.setdefault('lr', 0.001)
+        optimizer_config.setdefault('momentum', 0.9)
+        optimizer_config.setdefault('weight_decay', 0.0)
         optimizer = optim.SGD(
             params=model.parameters(),
-            lr=config['optimizer'][opt_name]['lr'],
-            momentum=config['optimizer'][opt_name]['momentum'],
-            weight_decay=config['optimizer'][opt_name]['weight_decay']
+            lr=optimizer_config['lr'],
+            momentum=optimizer_config['momentum'],
+            weight_decay=optimizer_config['weight_decay']
         )
         return optimizer
     elif opt_name == 'adam':
+        optimizer_config = config['optimizer'][opt_name]
+        optimizer_config.setdefault('lr', 0.0003)
+        optimizer_config.setdefault('weight_decay', 0.0)
+        optimizer_config.setdefault('beta1', 0.9)
+        optimizer_config.setdefault('beta2', 0.999)
+        optimizer_config.setdefault('eps', 1e-8)
+        optimizer_config.setdefault('amsgrad', False)
         optimizer = optim.Adam(
             params=model.parameters(),
-            lr=config['optimizer'][opt_name]['lr'],
-            weight_decay=config['optimizer'][opt_name]['weight_decay'],
-            betas=(config['optimizer'][opt_name]['beta1'], config['optimizer'][opt_name]['beta2']),
-            eps=config['optimizer'][opt_name]['eps'],
-            amsgrad=config['optimizer'][opt_name]['amsgrad'],
+            lr=optimizer_config['lr'],
+            weight_decay=optimizer_config['weight_decay'],
+            betas=(optimizer_config['beta1'], optimizer_config['beta2']),
+            eps=optimizer_config['eps'],
+            amsgrad=optimizer_config['amsgrad'],
         )
         return optimizer
     elif opt_name == 'sam':
+        optimizer_config = config['optimizer'][opt_name]
+        optimizer_config.setdefault('lr', 0.001)
+        optimizer_config.setdefault('momentum', 0.9)
         optimizer = SAM(
             model.parameters(), 
             optim.SGD, 
-            lr=config['optimizer'][opt_name]['lr'],
-            momentum=config['optimizer'][opt_name]['momentum'],
+            lr=optimizer_config['lr'],
+            momentum=optimizer_config['momentum'],
         )
     else:
         raise NotImplementedError('Optimizer {} is not implemented'.format(config['optimizer']))
@@ -202,6 +224,7 @@ def choose_scheduler(config, optimizer):
         )
         return scheduler
     elif config['lr_scheduler'] == 'cosine':
+        config.setdefault('lr_eta_min', 0.0)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=config['lr_T_max'],
@@ -251,6 +274,24 @@ def main():
         
     config['save_ckpt'] = args.save_ckpt
     config['save_feat'] = args.save_feat
+    config.setdefault('cuda', torch.cuda.is_available())
+    config.setdefault('cudnn', False)
+    config.setdefault('metric_scoring', 'auc')
+    config.setdefault('with_landmark', False)
+    config.setdefault('with_mask', False)
+    config.setdefault('use_data_augmentation', False)
+    config.setdefault('data_aug', {
+        'flip_prob': 0.5,
+        'rotate_prob': 0.5,
+        'rotate_limit': [-10, 10],
+        'blur_prob': 0.5,
+        'blur_limit': [3, 7],
+        'brightness_prob': 0.5,
+        'brightness_limit': [-0.1, 0.1],
+        'contrast_limit': [-0.1, 0.1],
+        'quality_lower': 40,
+        'quality_upper': 100,
+    })
     if config['lmdb']:
         config['dataset_json_folder'] = 'preprocessing/dataset_json_v3'
     

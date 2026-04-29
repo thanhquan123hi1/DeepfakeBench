@@ -2,8 +2,7 @@
 # Set PYTHONPATH to include training directory for proper module imports
 export PYTHONPATH="${PYTHONPATH}:$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/training"
 
-# Use miniconda3 Python with PyTorch support
-/kaggle/working/miniconda3/bin/python3 training/train.py \
+python training/train.py \
 --detector_path ./training/config/detector/gend_effort.yaml  \
 --train_dataset "FaceForensics++" \
 --test_dataset  "Celeb-DF-v2" "UADFV" "DFDCP"

@@ -1,17 +1,14 @@
 # log dir
-log_dir: ./zhiyuanyan/logs/benchv2/icml25/release
+log_dir: ./logs/gend_effort_simple
 
 # model setting
-pretrained: 'no need to provide this for the effort model'
 model_name: gend_effort
 backbone_name: vit
 
-# Loss settings
-lambda_supcon: 0.3           # Lực kéo lõi Real
-temperature: 0.07            # Nhiệt độ cho SupCon
-weight_real: 1.0             # Trọng số CE
-weight_fake: 2.0             # Trọng số CE
-label_smoothing: 0.1         # Ngăn model tự tin thái quá
+# Loss settings (Duy nhất Cross-Entropy)
+weight_real: 1.0            # Trọng số cho class thật
+weight_fake: 2.0            # Trọng số cho class giả (thường cao hơn để tăng AUC)
+label_smoothing: 0.1        # Giúp model không bị overfitting
 
 # backbone setting
 backbone_config:
@@ -21,37 +18,19 @@ backbone_config:
   dropout: false
 
 # dataset
-dataset_type : pair
-all_dataset: [FaceForensics++, FF-F2F, FF-DF, FF-FS, FF-NT, FaceShifter, DeepFakeDetection, Celeb-DF-v1, Celeb-DF-v2, DFDCP, DFDC, DeeperForensics-1.0, UADFV]
 train_dataset: [FaceForensics++]
-test_dataset: [Celeb-DF-v2, FaceShifter, DeeperForensics-1.0]
+test_dataset: [Celeb-DF-v2]
 
 compression: c23
-train_batchSize: 64
-test_batchSize: 128
-workers: 8
+train_batchSize: 4
+test_batchSize: 4
+workers: 2
 frame_num:
   train: 8
   test: 32
 resolution: 224
-with_mask: false
-with_landmark: false
 
-# data augmentation
-use_data_augmentation: true
-data_aug:
-  flip_prob: 0.5
-  rotate_prob: 0.5
-  rotate_limit: [-10, 10]
-  blur_prob: 0.5
-  blur_limit: [3, 7]
-  brightness_prob: 0.5
-  brightness_limit: [-0.1, 0.1]
-  contrast_limit: [-0.1, 0.1]
-  quality_lower: 40
-  quality_upper: 100
-
-# CLIP mean/std
+# CLIP mean/std chuẩn
 mean: [0.48145466, 0.4578275, 0.40821073]
 std:  [0.26862954, 0.26130258, 0.27577711]
 
@@ -59,35 +38,21 @@ std:  [0.26862954, 0.26130258, 0.27577711]
 optimizer:
   type: adam
   adam:
-    lr: 0.0003
+    lr: 0.0003              # LR 3e-4 là mức chuẩn cho tuning Linear Head
     beta1: 0.9
     beta2: 0.999
-    eps: 0.00000001
-    weight_decay: 0.0
-    amsgrad: false
+    weight_decay: 0.0001
 
 # training config
 lr_scheduler: cosine
-lr_T_max: 10
-lr_eta_min: 0.00001
+lr_T_max: 15
 nEpochs: 15
 start_epoch: 0
 save_epoch: 1
-rec_iter: 100
-logdir: /kaggle/tmp/logs
 manualSeed: 1024
-save_ckpt: true
-save_feat: true
-save_avg: true
 
-# loss function
-loss_func: cross_entropy
-losstype: null
+# SWA giúp ổn định AUC khi dùng CE Loss
+SWA: true
+swa_start: 5
 
-# metric
 metric_scoring: auc
-
-# cuda
-ngpu: 1
-cuda: true
-cudnn: true
