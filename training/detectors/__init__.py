@@ -3,8 +3,9 @@ Detector Registry Module
 Fixed to avoid circular imports and use correct utils path
 """
 
-# Import the DETECTOR registry from metrics.registry
-from metrics.registry import DETECTOR
+from metrics.registry import Registry
+
+DETECTOR = Registry('detector')
 
 # Lazy loading to avoid circular imports
 def _lazy_load_detectors():
