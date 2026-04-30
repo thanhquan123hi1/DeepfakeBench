@@ -1,26 +1,8 @@
 """
-DeepFakeBench test.py (pretrained evaluation) + optional feature dump (.pkl) for t-SNE
-
-✅ What this script does:
-- Load detector yaml + (optional) training/test config overrides
-- Build DeepFakeBench test dataloader(s)
-- Load pretrained weights (.pth)
-- Run inference: collect prob, label(binary), feat
-- Compute metrics via get_test_metrics
-- ✅ ONLY IF you pass --save_feat:
-    Save feature pickle per dataset:
-      tsne_dict_<model>_<dataset>.pkl
-    containing:
-      {'feat': (N,D), 'label_spe': (N,), 'pred': (N,), 'label': (N,), 'img_names': ...}
-
-Run example:
-cd /kaggle/working/DeepfakeBench
-PYTHONPATH=. python -u training/test.py \
-  --detector_path training/config/detector/gend_effort.yaml \
-  --test_dataset FaceForensics++ \
-  --weights_path /kaggle/input/datasets/xuanhuydinh/deepfakebench/Weight/effort_clip_L14_trainOn_FaceForensic.pth \
-  --save_feat \
-  --feat_out_dir /kaggle/working/tsne_pkls
+DeepFakeBench DDP test.py (Multi-GPU Evaluation)
+✅ Hỗ trợ DDP tương tự train.py - Sửa lỗi Duplicate GPU
+✅ Tự động gom dữ liệu từ nhiều GPU để tính AUC/EER chính xác
+✅ Xuất file .pkl cho t-SNE (Chỉ thực hiện tại Rank 0)
 """
 
 import os
@@ -31,20 +13,22 @@ import random
 import argparse
 import numpy as np
 from tqdm import tqdm
+from datetime import timedelta
 
 import torch
+import torch.nn as nn
 import torch.backends.cudnn as cudnn
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 # ---------------- PATH FIX (repo root) ----------------
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))  # /kaggle/working/DeepfakeBench
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
-# ---------------- Imports: metrics/detectors/datasets ----------------
 from metrics.utils import get_test_metrics
 from detectors import DETECTOR
 
-# Your repo has datasets under training/dataset (Kaggle)
-# We support both layouts just in case.
 try:
     from training.dataset.abstract_dataset import DeepfakeAbstractBaseDataset
     from training.dataset.lrl_dataset import LRLDataset
@@ -53,61 +37,59 @@ except Exception:
     try:
         from dataset.lrl_dataset import LRLDataset
     except Exception:
-        LRLDataset = None  # if not present
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+        LRLDataset = None
 
 # ---------------- CLI ----------------
-parser = argparse.ArgumentParser(description="DeepFakeBench test + optional feature dump for TSNE")
-parser.add_argument(
-    "--detector_path",
-    type=str,
-    default="training/config/detector/resnet34.yaml",
-    help="path to detector YAML file",
-)
+parser = argparse.ArgumentParser(description="DeepFakeBench DDP test + optional feature dump")
+parser.add_argument("--detector_path", type=str, required=True, help="path to detector YAML file")
 parser.add_argument("--test_dataset", nargs="+", default=None, help="list of test dataset names")
-parser.add_argument("--weights_path", type=str, default=None, help="path to pretrained weights .pth")
-
-# ✅ Only save feature when user passes this flag
+parser.add_argument("--weights_path", type=str, required=True, help="path to pretrained weights .pth")
 parser.add_argument("--save_feat", action="store_true", default=False, help="save feature pkl for TSNE")
 parser.add_argument("--feat_out_dir", type=str, default="tsne_pkls", help="output directory for tsne_dict_*.pkl")
-parser.add_argument("--max_samples", type=int, default=None, help="optional cap on number of samples per dataset")
+parser.add_argument("--max_samples", type=int, default=None, help="optional cap on number of samples")
+parser.add_argument("--ddp", action='store_true', default=False, help="Enable Distributed Data Parallel")
+parser.add_argument('--local_rank', '--local-rank', type=int, default=0)
 
 args = parser.parse_args()
 
+# --- KHẮC PHỤC LỖI DUPLICATE GPU ---
+if args.ddp:
+    # Lấy LOCAL_RANK từ môi trường (do torchrun cấp)
+    current_local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    torch.cuda.set_device(current_local_rank)
+    dist.init_process_group(backend='nccl', timeout=timedelta(minutes=30))
+    device = torch.device("cuda", current_local_rank)
+    is_main_process = (dist.get_rank() == 0)
+else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    current_local_rank = 0
+    is_main_process = True
 
 def init_seed(config):
-    if config.get("manualSeed", None) is None:
-        config["manualSeed"] = random.randint(1, 10000)
-    random.seed(config["manualSeed"])
-    np.random.seed(config["manualSeed"])
-    torch.manual_seed(config["manualSeed"])
-    if config.get("cuda", True):
-        torch.cuda.manual_seed_all(config["manualSeed"])
-
+    seed = config.get("manualSeed", 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 def prepare_testing_data(config):
-    """
-    Mirrors DeepFakeBench style:
-    - DeepfakeAbstractBaseDataset(config, mode='test') for most cases
-    - LRLDataset for dataset_type == 'lrl' (if available)
-    """
     def get_test_data_loader(cfg, test_name):
         cfg = cfg.copy()
         cfg["test_dataset"] = test_name
-
         if cfg.get("dataset_type", None) == "lrl" and LRLDataset is not None:
             test_set = LRLDataset(config=cfg, mode="test")
         else:
             test_set = DeepfakeAbstractBaseDataset(config=cfg, mode="test")
 
+        sampler = DistributedSampler(test_set, shuffle=False) if args.ddp else None
+        
         dl = torch.utils.data.DataLoader(
             dataset=test_set,
             batch_size=int(cfg["test_batchSize"]),
             shuffle=False,
             num_workers=int(cfg["workers"]),
             collate_fn=test_set.collate_fn,
+            sampler=sampler,
             drop_last=False,
         )
         return dl
@@ -117,220 +99,127 @@ def prepare_testing_data(config):
         test_data_loaders[one_test_name] = get_test_data_loader(config, one_test_name)
     return test_data_loaders
 
-
 @torch.no_grad()
-def inference(model, data_dict):
-    return model(data_dict, inference=True)
-
-
-def _move_batch_to_device(data_dict):
-    # trainer style: move all tensor fields except 'name'
-    for k in list(data_dict.keys()):
-        if data_dict[k] is None or k == "name":
-            continue
-        if torch.is_tensor(data_dict[k]):
-            data_dict[k] = data_dict[k].to(device)
-
-    # Handle video frames: [B,T,3,H,W] -> take first frame
-    if "image" in data_dict and torch.is_tensor(data_dict["image"]) and data_dict["image"].ndim == 5:
-        data_dict["image"] = data_dict["image"][:, 0]
-
-
 def test_one_dataset(model, data_loader, max_samples=None):
-    """
-    Returns:
-      pred_prob: (N,) float
-      label_bin: (N,) int (0/1)
-      feat:      (N,D) float
-      label_spe: (N,) int  (0..4 if exists; else fallback to binary label)
-      img_names: list[str]
-    """
-    pred_list = []
-    label_list = []
-    feat_list = []
-    label_spe_list = []
-    img_names = []
-
+    model.eval()
+    pred_list, label_list, feat_list, label_spe_list = [], [], [], []
     n = 0
-    for _, data_dict in tqdm(enumerate(data_loader), total=len(data_loader)):
-        # Keep original label_spe if present BEFORE overwriting label
-        batch_label_spe = None
+
+    pbar = tqdm(enumerate(data_loader), total=len(data_loader), disable=not is_main_process)
+    
+    for _, data_dict in pbar:
+        label_bin = torch.where(data_dict["label"] != 0, 1, 0).to(device)
+        
+        for k in ["image", "label"]:
+            if k in data_dict and torch.is_tensor(data_dict[k]):
+                data_dict[k] = data_dict[k].to(device)
+        
+        if data_dict["image"].ndim == 5:
+            data_dict["image"] = data_dict["image"][:, 0]
+
+        outputs = model(data_dict, inference=True)
+        
+        pred_list.append(outputs["prob"])
+        label_list.append(label_bin)
+        feat_list.append(outputs["feat"])
+        
         if "label_spe" in data_dict and data_dict["label_spe"] is not None:
-            batch_label_spe = data_dict["label_spe"]
+            label_spe_list.append(data_dict["label_spe"].to(device))
+        else:
+            label_spe_list.append(label_bin)
 
-        # Convert label to binary for metrics (same as Trainer.test_one_dataset does)
-        # In many configs, data_dict['label'] is multi-class or real/fake id, we binarize:
-        label_bin = torch.where(data_dict["label"] != 0, 1, 0)
-        data_dict["label"] = label_bin
-
-        _move_batch_to_device(data_dict)
-
-        preds = inference(model, data_dict)  # expects {'prob','feat'}
-
-        pred_list.append(preds["prob"].detach().cpu().numpy())
-        label_list.append(data_dict["label"].detach().cpu().numpy())
-        feat_list.append(preds["feat"].detach().cpu().numpy())
-
-        if batch_label_spe is not None:
-            label_spe_list.append(batch_label_spe.detach().cpu().numpy())
-
-        # image names (if available) for debugging/traceability
-        if hasattr(data_loader.dataset, "data_dict") and isinstance(data_loader.dataset.data_dict, dict):
-            # dataset.data_dict['image'] is global list, but per-batch names may not be provided
-            pass
-        if "name" in data_dict and data_dict["name"] is not None:
-            # some datasets provide per-item names
-            try:
-                img_names.extend(list(data_dict["name"]))
-            except Exception:
-                pass
-
-        n += preds["feat"].shape[0]
+        n += outputs["feat"].shape[0]
         if max_samples is not None and n >= max_samples:
             break
 
-    pred_prob = np.concatenate(pred_list, axis=0)
-    label_bin = np.concatenate(label_list, axis=0).astype(int)
-    feat = np.concatenate(feat_list, axis=0)
+    # Thu thập kết quả cục bộ tại mỗi GPU
+    local_preds = torch.cat(pred_list, dim=0)
+    local_labels = torch.cat(label_list, dim=0)
+    local_feats = torch.cat(feat_list, dim=0)
+    local_spe = torch.cat(label_spe_list, dim=0)
 
-    if len(label_spe_list) > 0:
-        label_spe = np.concatenate(label_spe_list, axis=0).astype(int)
+    if args.ddp:
+        # Gom kết quả từ tất cả GPU về mọi rank (all_gather)
+        world_size = dist.get_world_size()
+        
+        def gather_tensor(tensor):
+            gathered_list = [torch.zeros_like(tensor) for _ in range(world_size)]
+            dist.all_gather(gathered_list, tensor)
+            return torch.cat(gathered_list, dim=0)
+
+        all_preds = gather_tensor(local_preds).cpu().numpy()
+        all_labels = gather_tensor(local_labels).cpu().numpy()
+        all_feats = gather_tensor(local_feats).cpu().numpy()
+        all_spe = gather_tensor(local_spe).cpu().numpy()
     else:
-        # fallback if dataset has no label_spe
-        label_spe = label_bin.astype(int)
+        all_preds = local_preds.cpu().numpy()
+        all_labels = local_labels.cpu().numpy()
+        all_feats = local_feats.cpu().numpy()
+        all_spe = local_spe.cpu().numpy()
 
-    return pred_prob, label_bin, feat, label_spe, img_names
-
-
-def save_tsne_pkl(out_dir, model_name, dataset_name, weights_path, pred_prob, label_bin, feat, label_spe, img_names):
-    os.makedirs(out_dir, exist_ok=True)
-    safe_model = model_name.replace("/", "_")
-    safe_data = dataset_name.replace("/", "_")
-    out_path = os.path.join(out_dir, f"tsne_dict_{safe_model}_{safe_data}.pkl")
-
-    tsne_dict = {
-        "feat": feat,                 # (N,D)
-        "label_spe": label_spe,       # (N,)
-        "pred": pred_prob,            # (N,)
-        "label": label_bin,           # (N,)
-        "img_names": img_names,       # optional
-        "dataset": dataset_name,
-        "model_name": model_name,
-        "weights_path": weights_path,
-    }
-
-    with open(out_path, "wb") as f:
-        pickle.dump(tsne_dict, f)
-
-    print(f"[SAVE_FEAT] {out_path}")
-    print(f"           feat={feat.shape}, label_spe_unique={np.unique(label_spe)}")
-
+    return all_preds, all_labels, all_feats, all_spe
 
 def main():
-    # ---- load yaml configs ----
     with open(args.detector_path, "r") as f:
         config = yaml.safe_load(f)
 
-    # optional override configs (like your code)
     test_cfg_path = os.path.join(ROOT, "training", "config", "test_config.yaml")
     if os.path.exists(test_cfg_path):
         with open(test_cfg_path, "r") as f:
-            config2 = yaml.safe_load(f)
-        if isinstance(config2, dict):
-            config.update(config2)
+            config.update(yaml.safe_load(f))
 
-    # ensure required defaults
-    config.setdefault("cuda", True)
-    config.setdefault("cudnn", True)
-    config.setdefault("workers", 4)
-    config.setdefault("test_batchSize", 64)
-    config.setdefault("metric_scoring", "auc")
-
-    # override datasets from CLI
-    if args.test_dataset is not None:
+    if args.test_dataset:
         config["test_dataset"] = args.test_dataset
 
-    if "test_dataset" not in config or not config["test_dataset"]:
-        raise ValueError("You must provide --test_dataset (e.g., FaceForensics++) or set it in YAML.")
-
-    # seed + cudnn
     init_seed(config)
     if config.get("cudnn", True):
         cudnn.benchmark = True
 
-    # ---- build dataloaders ----
-    test_data_loaders = prepare_testing_data(config)
-
-    # ---- build model ----
-    if "model_name" not in config:
-        raise ValueError("YAML must contain config['model_name'] (e.g., gend_effort).")
-
     model_class = DETECTOR[config["model_name"]]
     model = model_class(config).to(device)
 
-    # ---- load weights ----
-    if args.weights_path is None:
-        raise ValueError("--weights_path is required to test a pretrained model.")
-
-    print(f"===> Loading weights from: {args.weights_path}")
+    if is_main_process:
+        print(f"===> Loading weights from: {args.weights_path}")
+    
     ckpt = torch.load(args.weights_path, map_location="cpu")
-    if isinstance(ckpt, dict) and "state_dict" in ckpt:
-        ckpt = ckpt["state_dict"]
+    state_dict = ckpt['state_dict'] if 'state_dict' in ckpt else ckpt
+    new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(new_state_dict, strict=False)
 
-    new_ckpt = {}
-    for k, v in ckpt.items():
-        new_ckpt[k.replace("module.", "")] = v
+    if args.ddp:
+        model = DDP(model, device_ids=[current_local_rank], output_device=current_local_rank, find_unused_parameters=True)
 
-    msg = model.load_state_dict(new_ckpt, strict=False)
-    print("===> Load checkpoint done!")
-    print(f"     Missing keys: {len(msg.missing_keys)}")
-    print(f"     Unexpected keys: {len(msg.unexpected_keys)}")
-    if len(msg.missing_keys) > 0:
-        print(f"     Example missing: {msg.missing_keys[:3]} ...")
+    test_loaders = prepare_testing_data(config)
+    
+    for dataset_name, loader in test_loaders.items():
+        if is_main_process:
+            print(f"\n===== Testing on: {dataset_name} =====")
+        
+        pred_prob, label_bin, feat, label_spe = test_one_dataset(model, loader, args.max_samples)
 
-    # ---- test ----
-    model.eval()
-    all_metrics = {}
+        # Chỉ xử lý kết quả tại Rank 0 (Main Process)
+        if is_main_process:
+            metrics = get_test_metrics(y_pred=pred_prob, y_true=label_bin, img_names=None)
+            for k, v in metrics.items():
+                if k not in ["pred", "label", "dataset_dict"]:
+                    print(f"{k}: {v:.4f}")
 
-    for dataset_name, loader in test_data_loaders.items():
-        print(f"\n===== Testing on: {dataset_name} =====")
-        data_dict_global = loader.dataset.data_dict if hasattr(loader.dataset, "data_dict") else {}
-        img_names_global = data_dict_global.get("image", None)
+            if args.save_feat:
+                os.makedirs(args.feat_out_dir, exist_ok=True)
+                safe_name = dataset_name.replace("/", "_")
+                out_path = os.path.join(args.feat_out_dir, f"tsne_{config['model_name']}_{safe_name}.pkl")
+                with open(out_path, "wb") as f:
+                    pickle.dump({
+                        "feat": feat,
+                        "label": label_bin,
+                        "pred": pred_prob,
+                        "label_spe": label_spe
+                    }, f)
+                print(f"✅ Features saved to {out_path}")
 
-        pred_prob, label_bin, feat, label_spe, img_names_batch = test_one_dataset(
-            model, loader, max_samples=args.max_samples
-        )
-
-        # metrics use binary labels + prob
-        # DeepFakeBench get_test_metrics expects img_names list; prefer dataset.data_dict['image'] when available
-        img_names_for_metric = img_names_global if img_names_global is not None else img_names_batch
-        metric_one_dataset = get_test_metrics(y_pred=pred_prob, y_true=label_bin, img_names=img_names_for_metric)
-        all_metrics[dataset_name] = metric_one_dataset
-
-        # print metrics
-        for k, v in metric_one_dataset.items():
-            if k in ["pred", "label", "dataset_dict"]:
-                continue
-            print(f"{k}: {v}")
-
-        # ✅ Save feature ONLY when --save_feat is provided
-        if args.save_feat:
-            save_tsne_pkl(
-                out_dir=args.feat_out_dir,
-                model_name=config["model_name"],
-                dataset_name=dataset_name,
-                weights_path=args.weights_path,
-                pred_prob=pred_prob,
-                label_bin=label_bin,
-                feat=feat,
-                label_spe=label_spe,
-                img_names=(img_names_for_metric if isinstance(img_names_for_metric, list) else []),
-            )
-
-    print("\n===> Test Done!")
-    if args.save_feat:
-        print(f"===> Feature pkls saved under: {os.path.abspath(args.feat_out_dir)}")
-
+    if args.ddp:
+        dist.barrier() # Đảm bảo tất cả rank xong việc trước khi đóng
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()
