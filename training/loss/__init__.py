@@ -7,6 +7,7 @@ sys.path.append(parent_dir)
 sys.path.append(project_root_dir)
 
 from metrics.registry import LOSSFUNC
+from .asymmetric_contrastive import AsymmetricContrastiveLoss
 
 from .cross_entropy_loss import CrossEntropyLoss
 from .consistency_loss import ConsistencyCos
