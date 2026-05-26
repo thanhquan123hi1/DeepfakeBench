@@ -6,12 +6,36 @@ pretrained: 'no need to provide this for the effort model'
 model_name: gend_effort
 backbone_name: vit
 
-# Loss settings
-lambda_supcon: 0.3           # Lực kéo lõi Real
-temperature: 0.07            # Nhiệt độ cho SupCon
-weight_real: 1.0             # Trọng số CE
-weight_fake: 2.0             # Trọng số CE
-label_smoothing: 0.1         # Ngăn model tự tin thái quá
+# ============================================================
+# Loss settings: BCE + Asymmetric SupCon
+# ============================================================
+
+# Tổng loss:
+# L = L_BCE + lambda_supcon * L_AsymSupCon
+lambda_supcon: 0.05          # không nên để 0.3 lúc đầu, dễ làm contrastive dominate
+
+# Asymmetric SupCon
+temperature: 0.07
+base_temperature: 0.07
+contrast_mode: all
+
+real_label: 0
+lambda_fake: 0.1             # hệ số fake-real repulsion bên trong AsymSupCon
+fake_margin: 0.0             # ép cos(fake, real) <= 0
+
+# BCE class weight
+weight_real: 1.0
+weight_fake: 2.0             # fake = positive class, dùng pos_weight = 2.0
+
+# BCEWithLogitsLoss không dùng label_smoothing trực tiếp
+label_smoothing: 0.0
+
+# Projection head cho contrastive loss
+feature_dim: 1024
+projection_dim: 256
+
+# Fine-tuning setting
+last_k_blocks: 2             # mở 2 transformer blocks cuối của CLIP ViT
 
 # backbone setting
 backbone_config:
@@ -21,7 +45,7 @@ backbone_config:
   dropout: false
 
 # dataset
-dataset_type : pair
+dataset_type: pair
 all_dataset: [FaceForensics++, FF-F2F, FF-DF, FF-FS, FF-NT, FaceShifter, DeepFakeDetection, Celeb-DF-v1, Celeb-DF-v2, DFDCP, DFDC, DeeperForensics-1.0, UADFV]
 train_dataset: [FaceForensics++]
 test_dataset: [Celeb-DF-v2, FaceShifter, DeeperForensics-1.0]
@@ -59,17 +83,17 @@ std:  [0.26862954, 0.26130258, 0.27577711]
 optimizer:
   type: adam
   adam:
-    lr: 0.0003
+    lr: 0.0001              # 0.0003 hơi cao nếu mở last_k_blocks
     beta1: 0.9
     beta2: 0.999
     eps: 0.00000001
-    weight_decay: 0.0
+    weight_decay: 0.0001
     amsgrad: false
 
 # training config
 lr_scheduler: cosine
 lr_T_max: 10
-lr_eta_min: 0.00001
+lr_eta_min: 0.000001
 nEpochs: 15
 start_epoch: 0
 save_epoch: 1
@@ -81,8 +105,8 @@ save_feat: true
 save_avg: true
 
 # loss function
-loss_func: cross_entropy
-losstype: null
+loss_func: asym_supcon
+losstype: bce_asym_supcon
 
 # metric
 metric_scoring: auc
