@@ -102,7 +102,7 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
             ], p=0.5),
             A.ImageCompression(quality_lower=self.config['data_aug']['quality_lower'], quality_upper=self.config['data_aug']['quality_upper'], p=0.5)
         ], 
-            keypoint_params=A.KeypointParams(format='xy') if self.config['with_landmark'] else None
+            keypoint_params=A.KeypointParams(format='xy', remove_invisible=False) if self.config['with_landmark'] else None
         )
         return trans
 
@@ -110,6 +110,29 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
         scale_factor = new_size / original_size
         rescaled_landmarks = landmarks * scale_factor
         return rescaled_landmarks
+
+    def sanitize_landmarks(self, landmarks, width, height, allow_rescale=True):
+        landmarks = np.asarray(landmarks, dtype=np.float32).copy()
+        if landmarks.size == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+
+        landmarks = landmarks.reshape(-1, 2)
+        landmarks = np.nan_to_num(landmarks, nan=0.0, posinf=0.0, neginf=0.0)
+
+        max_coord = float(np.max(landmarks)) if landmarks.size > 0 else 0.0
+        target_size = float(max(width, height))
+        original_size = float(self.config.get('landmark_original_size', 256))
+        if allow_rescale and max_coord > target_size and original_size > 0:
+            landmarks = self.rescale_landmarks(
+                landmarks,
+                original_size=original_size,
+                new_size=target_size,
+            )
+
+        # Albumentations checks keypoints before transforms; keep them strictly inside.
+        landmarks[:, 0] = np.clip(landmarks[:, 0], 0.0, max(float(width) - 1e-4, 0.0))
+        landmarks[:, 1] = np.clip(landmarks[:, 1], 0.0, max(float(height) - 1e-4, 0.0))
+        return landmarks.astype(np.float32)
 
     def collect_img_and_label_for_one_dataset(self, dataset_name: str):
         label_list = []
@@ -314,7 +337,17 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
                 if binary is None:
                      return np.zeros((81, 2))
                 landmark = np.frombuffer(binary, dtype=np.uint32).reshape((81, 2))
-                landmark = self.rescale_landmarks(np.float32(landmark), original_size=256, new_size=self.config['resolution'])
+                landmark = self.rescale_landmarks(
+                    np.float32(landmark),
+                    original_size=self.config.get('landmark_original_size', 256),
+                    new_size=self.config['resolution'],
+                )
+        landmark = self.sanitize_landmarks(
+            landmark,
+            width=self.config['resolution'],
+            height=self.config['resolution'],
+            allow_rescale=True,
+        )
         return landmark
 
     def to_tensor(self, img):
@@ -334,8 +367,9 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
         kwargs = {'image': img}
         
         if landmark is not None:
+            h, w = img.shape[:2]
+            landmark = self.sanitize_landmarks(landmark, width=w, height=h, allow_rescale=True)
             kwargs['keypoints'] = landmark
-            kwargs['keypoint_params'] = A.KeypointParams(format='xy')
         if mask is not None:
             mask = mask.squeeze(2)
             if mask.max() > 0:
@@ -348,7 +382,13 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
         augmented_mask = transformed.get('mask',mask)
 
         if augmented_landmark is not None:
-            augmented_landmark = np.array(augmented_landmark)
+            h, w = augmented_img.shape[:2]
+            augmented_landmark = self.sanitize_landmarks(
+                augmented_landmark,
+                width=w,
+                height=h,
+                allow_rescale=False,
+            )
 
         if augmentation_seed is not None:
             random.seed()
@@ -403,7 +443,7 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
             if not no_norm:
                 image_trans = self.normalize(self.to_tensor(image_trans))
                 if self.config['with_landmark']:
-                    landmarks_trans = torch.from_numpy(landmarks)
+                    landmarks_trans = torch.from_numpy(np.asarray(landmarks_trans, dtype=np.float32))
                 if self.config['with_mask']:
                     mask_trans = torch.from_numpy(mask_trans)
 
