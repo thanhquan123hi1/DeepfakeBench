@@ -354,6 +354,14 @@ def main():
                 )
         if best_metric is not None:
             logger.info(f"===> Epoch[{epoch}] end with testing {metric_scoring}: {parse_metric_for_print(best_metric)}!")
+        if (
+            scheduler is not None
+            and config.get('scheduler_step_per_epoch', True)
+            and not config.get('SWA', False)
+        ):
+            scheduler.step()
+            current_lr = optimizer.param_groups[0]['lr']
+            logger.info(f"Scheduler stepped after epoch {epoch}. Current lr: {current_lr}")
     
     if best_metric is not None:
         logger.info("Stop Training on best Testing metric {}".format(parse_metric_for_print(best_metric))) 
@@ -361,7 +369,7 @@ def main():
     # update
     if 'svdd' in config['model_name']:
         model.update_R(epoch)
-    if scheduler is not None:
+    if scheduler is not None and not config.get('scheduler_step_per_epoch', True):
         scheduler.step()
 
     # close the tensorboard writers
