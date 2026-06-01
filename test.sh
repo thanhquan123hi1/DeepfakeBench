@@ -1,6 +1,6 @@
 python training/test.py \
---detector_path ./training/config/detector/gend_effort.yaml  \
---test_dataset  "Celeb-DF-v2" "UADFV" "DFDCP" \
---weights_path /kaggle/input/datasets/xuanhuydinh/deepfakebench/Weight/model_gend.pth \
---save_feat \
---feat_out_dir /kaggle/tmp/tsne_pkls
+  --detector_path training/config/detector/BiasLoraAsy.yaml \
+--test_dataset  "uniface_ff" "blendface_ff" "e4s_ff" "facedancer_ff" "fsgan_ff" "inswap_ff" "simswap_ff" \
+  --weights_path /kaggle/working/DeepfakeBench/training/pretrained/ckpt_best.pth
+
+#--test_dataset  "UADFV" "Celeb-DF-v2"  "DFDCP" "DeepFakeDetection" "DFDC" "uniface_ff" "blendface_ff" "e4s_ff" "facedancer_ff" "fsgan_ff" "inswap_ff" "simswap_ff" \
