@@ -102,9 +102,45 @@ Verify all 19 strategies, asserting that no backbone weights or LayerNorm scales
 python test_bias_tuning.py
 ```
 
-### 3. Training with Specific Bias Strategies
+### 3. One-Command Training (Makefile & maketrain.sh)
 
-You can run experiments using either CLI arguments or by configuring [`training/config/detector/clip_bias.yaml`](training/config/detector/clip_bias.yaml):
+We provide both a comprehensive **`Makefile`** and an easy-to-use **`maketrain.sh`** script with automatic environment configuration:
+
+#### Option A: Using `make` (Recommended)
+```bash
+# View all available targets and options
+make help
+
+# 2-GPU DDP Training Shortcuts:
+make train-all-bias      # Train all bias parameters on 2 GPUs (0.09% params)
+make train-v-bias        # Train only Value bias on 2 GPUs (0.0088% params)
+make train-ln-bias       # Train LayerNorm beta on 2 GPUs (0.0176% params)
+make train-linear-bias   # Train all linear biases on 2 GPUs (0.0736% params)
+make train-late-bias     # Train late blocks 16-23 on 2 GPUs (0.0304% params)
+make train-v-late        # Value bias in late blocks on 2 GPUs (0.0034% params)
+make train-full          # Full Fine-Tuning (100% backbone) on 2 GPUs
+
+# Custom parameters:
+make train-ddp STRATEGY=v_bias GPUS=2 LAYER_RANGE=late
+make train STRATEGY=v_bias  # Single GPU
+```
+
+#### Option B: Using `maketrain.sh`
+```bash
+# Simple positional syntax:
+./maketrain.sh                      # Train 'all_bias' on 2 GPUs (DDP)
+./maketrain.sh v_bias               # Train 'v_bias' on 2 GPUs (DDP)
+./maketrain.sh v_bias 1             # Train 'v_bias' on 1 GPU
+./maketrain.sh full 2               # Full Fine-Tuning on 2 GPUs
+
+# Flag-based syntax:
+./maketrain.sh --strategy v_bias --layer-range late --gpus 2
+./maketrain.sh --strategy ln_bias --train-data FaceForensics++ --test-data Celeb-DF-v2
+```
+
+### 4. Direct Python Training (Alternative)
+
+You can also run experiments directly via Python CLI:
 
 ```bash
 # A. Value-bias only (V-bias)
@@ -117,28 +153,12 @@ python training/train.py \
   --detector_path ./training/config/detector/clip_bias.yaml \
   --tuning ln_bias
 
-# C. All Linear biases
-python training/train.py \
-  --detector_path ./training/config/detector/clip_bias.yaml \
-  --tuning linear_bias
-
-# D. Depth ablation: Late blocks (blocks 16-23)
+# C. Depth ablation: Late blocks (blocks 16-23)
 python training/train.py \
   --detector_path ./training/config/detector/clip_bias.yaml \
   --tuning bias_late
 
-# E. Combined Type × Depth (V-bias in late blocks)
-python training/train.py \
-  --detector_path ./training/config/detector/clip_bias.yaml \
-  --tuning v_bias \
-  --layer_range late
-```
-
-### 4. Multi-GPU Distributed Training (DDP)
-
-Run on 2 GPUs via `torchrun`:
-
-```bash
+# D. 2-GPU Distributed Training (DDP)
 torchrun --nproc_per_node=2 training/train.py \
   --detector_path ./training/config/detector/clip_bias.yaml \
   --tuning v_bias \
