@@ -100,14 +100,26 @@ class Trainer(object):
 
 
     def speed_up(self):
-        self.model.to(device)
-        self.model.device = device
-        if self.config['ddp'] == True:
-            num_gpus = torch.cuda.device_count()
-            print(f'avai gpus: {num_gpus}')
-            # local_rank=[i for i in range(0,num_gpus)]
-            self.model = DDP(self.model, device_ids=[self.config['local_rank']],find_unused_parameters=True, output_device=self.config['local_rank'])
-            #self.optimizer =  nn.DataParallel(self.optimizer, device_ids=[int(os.environ['LOCAL_RANK'])])
+        if self.config.get('ddp', False):
+            local_rank = int(os.environ["LOCAL_RANK"])
+
+            torch.cuda.set_device(local_rank)
+            device = torch.device("cuda", local_rank)
+
+            self.model.to(device)
+            self.model.device = device
+
+            print(f"avai gpus: {torch.cuda.device_count()}, local_rank: {local_rank}, device: {device}")
+
+            self.model = DDP(
+                self.model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+                find_unused_parameters=True
+            )
+        else:
+            self.model.to(device)
+            self.model.device = device
 
     def setTrain(self):
         self.model.train()
@@ -143,8 +155,15 @@ class Trainer(object):
                             'c': self.model.c,
                             'state_dict': self.model.state_dict(),}, save_path)
             else:
-                torch.save(self.model.state_dict(), save_path)
         self.logger.info(f"Checkpoint saved to {save_path}, current ckpt is {ckpt_info}")
+        
+        # Save tuning metadata JSON alongside checkpoint
+        raw_model = self.model.module if hasattr(self.model, 'module') else self.model
+        if hasattr(raw_model, 'tuning_metadata') and raw_model.tuning_metadata:
+            import json
+            meta_save_path = os.path.join(save_dir, "tuning_metadata.json")
+            with open(meta_save_path, 'w') as f:
+                json.dump(raw_model.tuning_metadata, f, indent=2)
 
     def save_swa_ckpt(self):
         save_dir = self.log_dir

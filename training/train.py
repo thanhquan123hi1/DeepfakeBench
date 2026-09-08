@@ -50,6 +50,8 @@ parser.add_argument('--task_target', type=str, default="", help='specify the tar
 
 # [NEW] Thêm tham số weights_path giống test.py
 parser.add_argument('--weights_path', type=str, default=None, help='Path to pretrained weights (overrides config)')
+parser.add_argument('--tuning', type=str, default=None, help='Tuning strategy (e.g. all_bias, linear_bias, ln_bias, v_bias, mlp_bias, bias_late, etc.)')
+parser.add_argument('--layer_range', type=str, default=None, help='Layer range for tuning (e.g. all, early, middle, late, 16-23)')
 
 args = parser.parse_args()
 torch.cuda.set_device(args.local_rank)
@@ -161,9 +163,10 @@ def prepare_testing_data(config):
 
 def choose_optimizer(model, config):
     opt_name = config['optimizer']['type']
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
     if opt_name == 'sgd':
         optimizer = optim.SGD(
-            params=model.parameters(),
+            params=trainable_params,
             lr=config['optimizer'][opt_name]['lr'],
             momentum=config['optimizer'][opt_name]['momentum'],
             weight_decay=config['optimizer'][opt_name]['weight_decay']
@@ -171,7 +174,7 @@ def choose_optimizer(model, config):
         return optimizer
     elif opt_name == 'adam':
         optimizer = optim.Adam(
-            params=model.parameters(),
+            params=trainable_params,
             lr=config['optimizer'][opt_name]['lr'],
             weight_decay=config['optimizer'][opt_name]['weight_decay'],
             betas=(config['optimizer'][opt_name]['beta1'], config['optimizer'][opt_name]['beta2']),
@@ -181,7 +184,7 @@ def choose_optimizer(model, config):
         return optimizer
     elif opt_name == 'sam':
         optimizer = SAM(
-            model.parameters(), 
+            trainable_params, 
             optim.SGD, 
             lr=config['optimizer'][opt_name]['lr'],
             momentum=config['optimizer'][opt_name]['momentum'],
@@ -248,6 +251,18 @@ def main():
     # [NEW] Logic ưu tiên: CLI Argument > YAML Config
     if args.weights_path:
         config['pretrained'] = args.weights_path
+
+    # Tuning strategy overrides via CLI
+    if args.tuning:
+        if 'tuning' not in config or isinstance(config['tuning'], str):
+            config['tuning'] = args.tuning
+        elif isinstance(config['tuning'], dict):
+            config['tuning']['parameter_type'] = args.tuning
+    if args.layer_range:
+        if isinstance(config.get('tuning'), dict):
+            config['tuning']['layer_range'] = args.layer_range
+        else:
+            config['tuning'] = {'parameter_type': config.get('tuning', 'all_bias'), 'layer_range': args.layer_range}
         
     config['save_ckpt'] = args.save_ckpt
     config['save_feat'] = args.save_feat
@@ -331,6 +346,14 @@ def main():
     else:
         logger.info("ℹ️ No pretrained weights provided via CLI or YAML. Training from scratch.")
     # --------------------------------------------------------
+
+    # Save experiment tuning metadata
+    if hasattr(model, 'tuning_metadata') and model.tuning_metadata:
+        import json
+        meta_path = os.path.join(logger_path, 'tuning_metadata.json')
+        with open(meta_path, 'w') as f:
+            json.dump(model.tuning_metadata, f, indent=2)
+        logger.info(f"Saved tuning metadata to {meta_path}")
 
     # prepare the optimizer
     optimizer = choose_optimizer(model, config)

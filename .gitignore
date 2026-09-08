@@ -4,8 +4,12 @@
 *.pyc
 *.pth
 *.pt
+*.ckpt
 *.dat
+*.log
 
-# Ignore datasets and logs
+# Ignore pretrained weights and logs
+training/pretrained/Weight/
 datasets/rgb/
+datasets/lmdb/
 logs/
