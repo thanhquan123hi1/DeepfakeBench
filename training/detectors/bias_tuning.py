@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 # Valid parameter types
 VALID_PARAMETER_TYPES = [
     'frozen',
+    'full',
     'all_bias',
     'linear_bias',
     'ln_bias',
@@ -32,6 +33,7 @@ VALID_LAYER_RANGES = ['all', 'early', 'middle', 'late']
 # Mapping from parameter_type to active categories
 CATEGORY_MAPPING: Dict[str, Set[str]] = {
     'frozen': set(),
+    'full': {'all'},
     'all_bias': {
         'q_bias', 'k_bias', 'v_bias', 'attn_proj_bias',
         'mlp_fc1_bias', 'mlp_fc2_bias', 'ln_bias'
@@ -297,6 +299,14 @@ def apply_bias_tuning(
         f"Applying bias tuning: strategy='{tuning_config.parameter_type}', "
         f"layer_range='{tuning_config.layer_range}' (active layers: {sorted(list(active_layers))}, total: {total_layers})"
     )
+
+    # Special case: Full fine-tuning
+    if tuning_config.parameter_type == 'full':
+        for p in backbone.parameters():
+            p.requires_grad = True
+        for p in classifier_head.parameters():
+            p.requires_grad = tuning_config.train_classifier
+        return print_trainable_parameters(model, tuning_config)
 
     # 2. Freeze entire backbone initially
     for p in backbone.parameters():
