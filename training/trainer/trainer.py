@@ -155,6 +155,7 @@ class Trainer(object):
                             'c': self.model.c,
                             'state_dict': self.model.state_dict(),}, save_path)
             else:
+                torch.save(self.model.state_dict(), save_path)
         self.logger.info(f"Checkpoint saved to {save_path}, current ckpt is {ckpt_info}")
         
         # Save tuning metadata JSON alongside checkpoint
