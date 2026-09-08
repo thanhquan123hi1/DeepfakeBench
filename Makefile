@@ -17,6 +17,7 @@ TRAIN_DATA     ?= FaceForensics++
 TEST_DATA      ?= Celeb-DF-v2
 LAYER_RANGE    ?= 
 WEIGHTS        ?= 
+PORT           ?= $(shell python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()') 
 
 # Extra args builder
 EXTRA_ARGS := 
@@ -75,8 +76,8 @@ train:
 
 .PHONY: train-ddp
 train-ddp:
-	@echo ">>> Running $(GPUS)-GPU DDP training with strategy='$(STRATEGY)'..."
-	torchrun --nproc_per_node=$(GPUS) training/train.py \
+	@echo ">>> Running $(GPUS)-GPU DDP training with strategy='$(STRATEGY)' on port $(PORT)..."
+	torchrun --nproc_per_node=$(GPUS) --master_port=$(PORT) training/train.py \
 		--detector_path $(CONFIG) \
 		--train_dataset "$(TRAIN_DATA)" \
 		--test_dataset "$(TEST_DATA)" \
@@ -136,8 +137,8 @@ test-ddp:
 		echo "Error: WEIGHTS parameter required. Example: make test-ddp WEIGHTS=./logs/.../ckpt_best.pth"; \
 		exit 1; \
 	fi
-	@echo ">>> Running $(GPUS)-GPU DDP testing with weights='$(WEIGHTS)'..."
-	torchrun --nproc_per_node=$(GPUS) training/test.py \
+	@echo ">>> Running $(GPUS)-GPU DDP testing with weights='$(WEIGHTS)' on port $(PORT)..."
+	torchrun --nproc_per_node=$(GPUS) --master_port=$(PORT) training/test.py \
 		--detector_path $(CONFIG) \
 		--test_dataset "$(TEST_DATA)" \
 		--weights_path "$(WEIGHTS)"

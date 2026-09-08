@@ -8,7 +8,9 @@ echo "=========================================================="
 echo "Starting 2-GPU DDP training CLIP Bias PEFT with strategy: $TUNING_STRATEGY"
 echo "=========================================================="
 
-torchrun --nproc_per_node=2 training/train.py \
+MASTER_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
+
+torchrun --nproc_per_node=2 --master_port="$MASTER_PORT" training/train.py \
   --detector_path ./training/config/detector/clip_bias.yaml \
   --train_dataset "FaceForensics++" \
   --test_dataset "Celeb-DF-v2" \
