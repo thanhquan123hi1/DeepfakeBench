@@ -35,8 +35,10 @@ from detectors.bias_subspace import (
     flatten_bias_gradients,
     compute_gradient_cosine_matrix,
     compute_method_projection_energies,
+    projection_energy_ratio,
     build_subspace_svd,
     build_subspace_mean,
+    build_subspace_balanced,
     SubspaceArtifact,
 )
 
@@ -172,12 +174,19 @@ def main():
     parser.add_argument("--train_dataset", type=str, default="FaceForensics++")
     parser.add_argument("--tuning", type=str, default="all_bias")
     parser.add_argument("--subspace_rank", type=int, default=2)
-    parser.add_argument("--subspace_method", type=str, choices=["shared_svd", "mean_direction"], default="shared_svd")
+    parser.add_argument("--subspace_method", type=str, choices=["shared_svd", "mean_direction", "balanced_subspace"], default="shared_svd")
     parser.add_argument("--batches_per_method", type=int, default=25)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--output", type=str, default="./bias_subspace_rank2.pt")
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    # Balanced subspace (MBBS) arguments
+    parser.add_argument("--balanced_beta", type=float, default=1.0, help="Weight for variance penalty in mean_variance")
+    parser.add_argument("--balanced_lr", type=float, default=0.01, help="Learning rate for Adam optimizer")
+    parser.add_argument("--balanced_steps", type=int, default=1000, help="Optimization steps")
+    parser.add_argument("--balanced_objective", type=str, choices=["mean_variance", "soft_min"], default="mean_variance")
+    parser.add_argument("--balanced_temperature", type=float, default=0.1, help="Temperature tau for soft_min")
+    parser.add_argument("--cached_gradients_artifact", type=str, default=None, help="Reuse cached gradients from existing artifact")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -188,6 +197,8 @@ def main():
     logger.info(f"  Detector Config : {args.detector_path}")
     parser_info = f"Rank: {args.subspace_rank} | Method: {args.subspace_method} | Batches/Method: {args.batches_per_method} | BatchSize: {args.batch_size}"
     logger.info(f"  Configuration   : {parser_info}")
+    if args.subspace_method == "balanced_subspace":
+        logger.info(f"  Balanced Specs  : Objective: {args.balanced_objective} | Beta: {args.balanced_beta} | LR: {args.balanced_lr} | Steps: {args.balanced_steps}")
     logger.info(f"  Output Artifact : {args.output}")
     logger.info(f"  Device          : {device}")
     logger.info("=" * 80)
@@ -217,33 +228,46 @@ def main():
     methods = ["FF-DF", "FF-F2F", "FF-FS", "FF-NT"]
     logger.info(f"Target manipulation methods ({len(methods)}): {methods}")
 
-    if args.subspace_method == "shared_svd" and args.subspace_rank > len(methods):
+    if args.subspace_method in ["shared_svd", "balanced_subspace"] and args.subspace_rank > len(methods):
         raise ValueError(
             f"Requested rank {args.subspace_rank} exceeds number of manipulation methods {len(methods)}. "
             f"Maximum rank for {len(methods)} methods is {len(methods)}."
         )
 
-    # 4. Collect gradients for each manipulation method
+    # 4. Collect or load cached gradients for each manipulation method
     method_gradients: Dict[str, torch.Tensor] = {}
 
-    for method_name in methods:
-        method_config = dict(config)
-        method_config['train_dataset'] = [method_name]
+    if args.cached_gradients_artifact and os.path.exists(args.cached_gradients_artifact):
+        logger.info(f"Loading cached method gradients from: {args.cached_gradients_artifact}")
+        cached_data = torch.load(args.cached_gradients_artifact, map_location="cpu")
+        if "mean_gradients" in cached_data and cached_data["mean_gradients"]:
+            for m in methods:
+                if m in cached_data["mean_gradients"]:
+                    method_gradients[m] = cached_data["mean_gradients"][m].cpu()
+            logger.info(f"Successfully loaded {len(method_gradients)} cached method gradients.")
+        else:
+            logger.warning("No mean_gradients found in cached artifact, falling back to data sampling.")
 
-        dataset = DeepfakeAbstractBaseDataset(config=method_config, mode='train')
-        logger.info(f"Loaded dataset for {method_name}: {len(dataset)} samples (Real + {method_name})")
+    if len(method_gradients) < len(methods):
+        method_gradients = {}
+        for method_name in methods:
+            method_config = dict(config)
+            method_config['train_dataset'] = [method_name]
 
-        g_tilde = collect_method_gradient(
-            model=model,
-            dataset=dataset,
-            method_name=method_name,
-            bias_specs=bias_specs,
-            batches_per_method=args.batches_per_method,
-            batch_size=args.batch_size,
-            device=device,
-            seed=args.seed
-        )
-        method_gradients[method_name] = g_tilde
+            dataset = DeepfakeAbstractBaseDataset(config=method_config, mode='train')
+            logger.info(f"Loaded dataset for {method_name}: {len(dataset)} samples (Real + {method_name})")
+
+            g_tilde = collect_method_gradient(
+                model=model,
+                dataset=dataset,
+                method_name=method_name,
+                bias_specs=bias_specs,
+                batches_per_method=args.batches_per_method,
+                batch_size=args.batch_size,
+                device=device,
+                seed=args.seed
+            )
+            method_gradients[method_name] = g_tilde
 
     # 5. Gradient agreement diagnostics (Cosine Similarity)
     cosine_matrix, method_order = compute_gradient_cosine_matrix(method_gradients)
@@ -260,12 +284,29 @@ def main():
     print("=" * 60 + "\n")
 
     # 6. Subspace construction
+    balanced_stats = None
     if args.subspace_method == "shared_svd":
         U_shared, singular_values, explained_energy = build_subspace_svd(
             method_gradients,
             rank=args.subspace_rank
         )
         rank_to_save = args.subspace_rank
+    elif args.subspace_method == "balanced_subspace":
+        U_shared, balanced_stats = build_subspace_balanced(
+            gradients_dict=method_gradients,
+            rank=args.subspace_rank,
+            beta=args.balanced_beta,
+            lr=args.balanced_lr,
+            steps=args.balanced_steps,
+            objective=args.balanced_objective,
+            temperature=args.balanced_temperature,
+            seed=args.seed,
+            log_interval=100,
+            device=device
+        )
+        rank_to_save = args.subspace_rank
+        singular_values = balanced_stats["singular_values"]
+        explained_energy = float(balanced_stats["final_mean"] / 100.0)
     else:  # mean_direction
         U_shared, singular_values, explained_energy = build_subspace_mean(method_gradients)
         rank_to_save = 1
@@ -297,7 +338,44 @@ def main():
         print(f"  {m:<10}: {r_val:>5.1f} %")
     print("=" * 60 + "\n")
 
-    # 8. Save artifact
+    # 8. Comparison Table (if balanced_subspace)
+    if balanced_stats is not None:
+        svd_cov = balanced_stats["svd_initial_coverage"]
+        bal_cov = balanced_stats["final_coverage"]
+        print("=" * 62)
+        print(f"         SVD rank-{rank_to_save}           Balanced rank-{rank_to_save}")
+        print("-" * 62)
+        for m in method_order:
+            s_val = svd_cov.get(m, 0.0)
+            b_val = bal_cov.get(m, 0.0)
+            print(f"{m:<10}  {s_val:>6.1f} %                 {b_val:>6.1f} %")
+        print("-" * 62)
+        print(f"{'Mean':<10}  {balanced_stats['svd_mean']:>6.1f} %                 {balanced_stats['final_mean']:>6.1f} %")
+        print(f"{'Minimum':<10}  {balanced_stats['svd_min']:>6.1f} %                 {balanced_stats['final_min']:>6.1f} %")
+        print(f"{'Std':<10}  {balanced_stats['svd_std']:>6.1f} %                 {balanced_stats['final_std']:>6.1f} %")
+        print("=" * 62 + "\n")
+
+    # 9. Dynamic SVD rank-3 diagnostic (from actual gradients)
+    if len(method_gradients) >= 3:
+        U_svd3, S3, _ = build_subspace_svd(method_gradients, rank=3)
+        cov_svd3 = compute_method_projection_energies(U_svd3, method_gradients)
+        cov3_vals = list(cov_svd3.values())
+        mean_cov3 = float(np.mean(cov3_vals))
+        min_cov3 = float(np.min(cov3_vals))
+        std_cov3 = float(np.std(cov3_vals))
+
+        print("=" * 62)
+        print("  SVD RANK-3 DIAGNOSTIC (COMPUTED FROM ACTUAL GRADIENTS)")
+        print("=" * 62)
+        for m in method_order:
+            print(f"  {m:<10}: {cov_svd3.get(m, 0.0):>5.1f} %")
+        print("-" * 62)
+        print(f"  Mean      : {mean_cov3:>5.1f} %")
+        print(f"  Minimum   : {min_cov3:>5.1f} %")
+        print(f"  Std       : {std_cov3:>5.1f} %")
+        print("=" * 62 + "\n")
+
+    # 10. Save artifact
     artifact = SubspaceArtifact(
         U=U_shared.cpu(),
         rank=rank_to_save,
@@ -313,7 +391,16 @@ def main():
         batches_per_method=args.batches_per_method,
         seed=args.seed,
         mean_gradients=method_gradients,
-        projection_energies=projection_energies
+        projection_energies=projection_energies,
+        objective=args.balanced_objective if args.subspace_method == "balanced_subspace" else None,
+        beta=args.balanced_beta if args.subspace_method == "balanced_subspace" else None,
+        optimization_steps=args.balanced_steps if args.subspace_method == "balanced_subspace" else None,
+        optimization_lr=args.balanced_lr if args.subspace_method == "balanced_subspace" else None,
+        coverage_per_method=balanced_stats["final_coverage"] if balanced_stats else None,
+        mean_coverage=balanced_stats["final_mean"] if balanced_stats else None,
+        min_coverage=balanced_stats["final_min"] if balanced_stats else None,
+        std_coverage=balanced_stats["final_std"] if balanced_stats else None,
+        svd_initial_coverage=balanced_stats["svd_initial_coverage"] if balanced_stats else None,
     )
 
     artifact.save(args.output)

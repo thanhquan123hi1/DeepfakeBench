@@ -124,6 +124,10 @@ train-v-late:
 train-subspace:
 	$(MAKE) train-ddp STRATEGY=all_bias_subspace GPUS=2 EXTRA_ARGS="--bias_subspace $(SUBSPACE_PATH) --bias_subspace_lambda $(LAMBDA)"
 
+.PHONY: train-balanced-subspace
+train-balanced-subspace:
+	$(MAKE) train-ddp STRATEGY=all_bias_subspace GPUS=2 EXTRA_ARGS="--bias_subspace ./bias_subspace_balanced_rank$(RANK).pt --bias_subspace_lambda $(LAMBDA)"
+
 .PHONY: estimate-subspace
 estimate-subspace:
 	@echo ">>> Estimating Manipulation-Invariant Bias Subspace (MIBS)..."
@@ -133,10 +137,25 @@ estimate-subspace:
 		--batches_per_method $(BATCHES_METHOD) \
 		--output $(SUBSPACE_PATH)
 
+.PHONY: estimate-balanced-subspace
+estimate-balanced-subspace:
+	@echo ">>> Estimating Manipulation-Balanced Bias Subspace (MBBS)..."
+	python3 training/estimate_bias_subspace.py \
+		--detector_path $(CONFIG) \
+		--subspace_method balanced_subspace \
+		--subspace_rank $(RANK) \
+		--cached_gradients_artifact $(SUBSPACE_PATH) \
+		--output ./bias_subspace_balanced_rank$(RANK).pt
+
 .PHONY: test-subspace
 test-subspace:
-	@echo ">>> Running MIBS Unit Test Suite (9 Tests)..."
+	@echo ">>> Running MIBS Unit Test Suite (11 Tests)..."
 	python3 test_bias_subspace.py
+
+.PHONY: audit-distribution
+audit-distribution:
+	@echo ">>> Auditing Training Class & Manipulation Distribution..."
+	python3 training/audit_training_distribution.py
 
 # ------------------------------------------------------------------------------
 # Testing Targets

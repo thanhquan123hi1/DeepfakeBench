@@ -357,6 +357,181 @@ def build_subspace_mean(
     return U, singular_values, explained_energy
 
 
+def projection_energy_ratio(U: torch.Tensor, g: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """
+    Computes scalar projection energy ratio R_m = ||U^T g||^2 / (||g||^2 + eps).
+    Supports autograd through U.
+    """
+    coeff = torch.matmul(U.t(), g)
+    captured = coeff.pow(2).sum()
+    total = g.pow(2).sum()
+    return captured / (total + eps)
+
+
+def build_subspace_balanced(
+    gradients_dict: Dict[str, torch.Tensor],
+    rank: int = 2,
+    beta: float = 1.0,
+    lr: float = 0.01,
+    steps: int = 1000,
+    objective: str = "mean_variance",
+    temperature: float = 0.1,
+    seed: int = 1024,
+    log_interval: int = 100,
+    device: Optional[torch.device] = None,
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    """
+    Manipulation-Balanced Bias Subspace (MBBS):
+    Optimizes a rank-r orthonormal subspace U to balance coverage across all manipulation methods.
+
+    Initializes from standard SVD rank-r subspace U_svd[:, :r] to start from maximum-energy configuration,
+    then rotates U to minimize coverage disparity while preserving high average coverage.
+
+    Orthonormality is strictly maintained at every step via thin QR decomposition:
+        Q, _ = torch.linalg.qr(A, mode="reduced")
+        U = Q[:, :rank]
+
+    Complexity: O(P * r) per step. Never instantiates P x P matrices.
+
+    Args:
+        gradients_dict: Mapping method_name -> normalized gradient vector [P].
+        rank: Target rank r.
+        beta: Weight for variance penalty in 'mean_variance' objective.
+        lr: Learning rate for Adam optimizer.
+        steps: Total optimization iterations.
+        objective: Optimization loss function ('mean_variance' or 'soft_min').
+        temperature: Temperature tau for 'soft_min' objective.
+        seed: Random seed for reproducibility.
+        log_interval: Iteration interval for trajectory logging.
+        device: Device to run optimization on (defaults to cuda if available else cpu).
+
+    Returns:
+        (U_balanced [P, rank], trajectory_and_stats_dict)
+    """
+    if objective not in ["mean_variance", "soft_min"]:
+        raise ValueError(f"Unknown objective '{objective}'. Allowed: 'mean_variance', 'soft_min'")
+    if rank < 1 or rank > len(gradients_dict):
+        raise ValueError(f"Rank must be between 1 and {len(gradients_dict)}, got {rank}")
+
+    torch.manual_seed(seed)
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    methods = list(gradients_dict.keys())
+    M = len(methods)
+
+    # 1. Stack column vectors G: [P, M]
+    cols = [gradients_dict[m].detach().to(device).to(torch.float32).reshape(-1, 1) for m in methods]
+    G = torch.cat(cols, dim=1)  # [P, M]
+
+    # 2. Standard SVD initialization: U_svd[:, :r]
+    U_svd, S, _ = torch.linalg.svd(G, full_matrices=False)
+    U_svd_r = U_svd[:, :rank].detach()
+
+    # Initial SVD coverage metrics
+    coeff_svd = torch.matmul(U_svd_r.t(), G)
+    cov_svd = (coeff_svd ** 2).sum(dim=0) / (G.pow(2).sum(dim=0) + 1e-12)
+    svd_initial_coverage = {m: float(cov_svd[i].item() * 100.0) for i, m in enumerate(methods)}
+    svd_mean = float(cov_svd.mean().item() * 100.0)
+    svd_min = float(cov_svd.min().item() * 100.0)
+    svd_std = float(cov_svd.std(unbiased=False).item() * 100.0)
+
+    # 3. Setup optimization parameter A, initialized from U_svd
+    A = U_svd_r.clone().detach().requires_grad_(True)
+    optimizer = torch.optim.Adam([A], lr=lr)
+
+    trajectory = []
+
+    for step in range(steps + 1):
+        optimizer.zero_grad()
+
+        # Enforce exact orthonormality via reduced QR: Q is [P, rank], Q.T @ Q = I
+        Q, _ = torch.linalg.qr(A, mode="reduced")
+        U = Q[:, :rank]
+
+        # Compute coverage per method
+        coeff = torch.matmul(U.t(), G)  # [rank, M]
+        coverage = (coeff.pow(2).sum(dim=0)) / (G.pow(2).sum(dim=0) + 1e-12)  # [M]
+
+        # Compute objective
+        if objective == "mean_variance":
+            loss_mean = -coverage.mean()
+            loss_balance = coverage.var(unbiased=False)
+            loss = loss_mean + beta * loss_balance
+        elif objective == "soft_min":
+            # softmin_tau(R) = -tau * logsumexp(-R / tau)
+            # L_U = - softmin_tau(R) = tau * logsumexp(-R / tau)
+            loss = temperature * torch.logsumexp(-coverage / temperature, dim=0)
+
+        # Logging at interval
+        if step % log_interval == 0 or step == steps:
+            cov_detached = coverage.detach().cpu()
+            step_cov = {m: float(cov_detached[i].item() * 100.0) for i, m in enumerate(methods)}
+            mean_cov = float(cov_detached.mean().item() * 100.0)
+            min_cov = float(cov_detached.min().item() * 100.0)
+            std_cov = float(cov_detached.std(unbiased=False).item() * 100.0)
+
+            record = {
+                "step": step,
+                "coverage": step_cov,
+                "mean": mean_cov,
+                "min": min_cov,
+                "std": std_cov,
+                "loss": float(loss.item())
+            }
+            trajectory.append(record)
+
+            cov_str = " | ".join([f"{m}: {step_cov[m]:.1f}%" for m in methods])
+            logger.info(
+                f"[MBBS Step {step:4d}/{steps}] {cov_str} | Mean: {mean_cov:.1f}% | Min: {min_cov:.1f}% | Std: {std_cov:.1f}% | Loss: {loss.item():.5f}"
+            )
+
+        if step < steps:
+            loss.backward()
+            optimizer.step()
+
+    # Final orthonormal basis
+    with torch.no_grad():
+        Q_final, _ = torch.linalg.qr(A, mode="reduced")
+        U_balanced = Q_final[:, :rank].detach()
+
+        # Final coverage calculation
+        coeff_final = torch.matmul(U_balanced.t(), G)
+        cov_final = (coeff_final.pow(2).sum(dim=0)) / (G.pow(2).sum(dim=0) + 1e-12)
+        cov_final_cpu = cov_final.cpu()
+
+        final_coverage = {m: float(cov_final_cpu[i].item() * 100.0) for i, m in enumerate(methods)}
+        final_mean = float(cov_final_cpu.mean().item() * 100.0)
+        final_min = float(cov_final_cpu.min().item() * 100.0)
+        final_std = float(cov_final_cpu.std(unbiased=False).item() * 100.0)
+
+        # Orthonormality verification
+        gram = U_balanced.t() @ U_balanced
+        eye = torch.eye(rank, device=U_balanced.device, dtype=U_balanced.dtype)
+        max_ortho_err = float((gram - eye).abs().max().item())
+
+    stats = {
+        "final_coverage": final_coverage,
+        "final_mean": final_mean,
+        "final_min": final_min,
+        "final_std": final_std,
+        "svd_initial_coverage": svd_initial_coverage,
+        "svd_mean": svd_mean,
+        "svd_min": svd_min,
+        "svd_std": svd_std,
+        "max_orthonormality_error": max_ortho_err,
+        "trajectory": trajectory,
+        "objective": objective,
+        "beta": beta,
+        "temperature": temperature,
+        "lr": lr,
+        "steps": steps,
+        "singular_values": S.cpu(),
+    }
+
+    return U_balanced.cpu(), stats
+
+
 def compute_method_projection_energies(
     U: torch.Tensor,
     method_gradients: Dict[str, torch.Tensor],
@@ -408,6 +583,15 @@ class SubspaceArtifact:
     seed: int
     mean_gradients: Optional[Dict[str, torch.Tensor]] = None
     projection_energies: Optional[Dict[str, float]] = None
+    objective: Optional[str] = None
+    beta: Optional[float] = None
+    optimization_steps: Optional[int] = None
+    optimization_lr: Optional[float] = None
+    coverage_per_method: Optional[Dict[str, float]] = None
+    mean_coverage: Optional[float] = None
+    min_coverage: Optional[float] = None
+    std_coverage: Optional[float] = None
+    svd_initial_coverage: Optional[Dict[str, float]] = None
 
     def save(self, filepath: str) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
@@ -430,6 +614,16 @@ class SubspaceArtifact:
             data["mean_gradients"] = {k: v.cpu() for k, v in self.mean_gradients.items()}
         if self.projection_energies:
             data["projection_energies"] = self.projection_energies
+
+        for attr in [
+            "objective", "beta", "optimization_steps", "optimization_lr",
+            "coverage_per_method", "mean_coverage", "min_coverage",
+            "std_coverage", "svd_initial_coverage"
+        ]:
+            val = getattr(self, attr, None)
+            if val is not None:
+                data[attr] = val
+
         torch.save(data, filepath)
         logger.info(f"Subspace artifact saved successfully to {filepath}")
 
@@ -474,7 +668,16 @@ class SubspaceArtifact:
             batches_per_method=data.get("batches_per_method", 0),
             seed=data.get("seed", 0),
             mean_gradients=data.get("mean_gradients", None),
-            projection_energies=data.get("projection_energies", None)
+            projection_energies=data.get("projection_energies", None),
+            objective=data.get("objective", None),
+            beta=data.get("beta", None),
+            optimization_steps=data.get("optimization_steps", None),
+            optimization_lr=data.get("optimization_lr", None),
+            coverage_per_method=data.get("coverage_per_method", None),
+            mean_coverage=data.get("mean_coverage", None),
+            min_coverage=data.get("min_coverage", None),
+            std_coverage=data.get("std_coverage", None),
+            svd_initial_coverage=data.get("svd_initial_coverage", None),
         )
 
         # Strict validation against current model specs if requested

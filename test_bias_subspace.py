@@ -38,7 +38,10 @@ from training.detectors.bias_subspace import (
     compute_subspace_loss,
     build_subspace_svd,
     build_subspace_mean,
+    build_subspace_balanced,
     compute_gradient_cosine_matrix,
+    compute_method_projection_energies,
+    projection_energy_ratio,
     SubspaceArtifact,
 )
 
@@ -269,6 +272,93 @@ class TestMIBSRegularization(unittest.TestCase):
         self.assertGreater(total_frozen, 300_000_000)
 
         print(f"  [PASS] Test 9: All {total_frozen:,} backbone weights remain strictly frozen.")
+
+    def test_10_balanced_subspace_optimization(self):
+        """Test 10: MBBS optimization balances coverage across methods and maintains orthonormality."""
+        print(">>> Running Test 10: Manipulation-Balanced Bias Subspace (MBBS) Optimization...")
+        methods = ["FF-DF", "FF-F2F", "FF-FS", "FF-NT"]
+        # Create synthetic gradients with known disparity
+        torch.manual_seed(1024)
+        synth_grads = {}
+        for i, m in enumerate(methods):
+            g = torch.randn(self.P, dtype=torch.float32)
+            synth_grads[m] = F.normalize(g, p=2, dim=0)
+
+        # 1. Test mean_variance objective
+        U_bal, stats = build_subspace_balanced(
+            synth_grads, rank=2, beta=1.0, lr=0.05, steps=50,
+            objective="mean_variance", seed=1024, log_interval=50
+        )
+        self.assertEqual(U_bal.shape, (self.P, 2))
+
+        # Check orthonormality
+        gram = U_bal.t() @ U_bal
+        eye = torch.eye(2, dtype=U_bal.dtype)
+        max_ortho_err = (gram - eye).abs().max().item()
+        self.assertLess(max_ortho_err, 1e-4, f"MBBS U must be orthonormal, got err={max_ortho_err}")
+
+        # Check that variance decreased or min increased
+        self.assertGreaterEqual(stats["final_min"], stats["svd_min"] - 1e-3)
+        self.assertLessEqual(stats["final_std"], stats["svd_std"] + 1e-3)
+
+        # 2. Test soft_min objective
+        U_soft, stats_soft = build_subspace_balanced(
+            synth_grads, rank=2, beta=1.0, lr=0.05, steps=50,
+            objective="soft_min", temperature=0.1, seed=1024, log_interval=50
+        )
+        self.assertEqual(U_soft.shape, (self.P, 2))
+        gram_soft = U_soft.t() @ U_soft
+        self.assertLess((gram_soft - eye).abs().max().item(), 1e-4)
+
+        print("  [PASS] Test 10: MBBS optimization and orthonormality verified (mean_variance & soft_min).")
+
+    def test_11_balanced_artifact_serialization(self):
+        """Test 11: SubspaceArtifact correctly serializes and deserializes MBBS metadata."""
+        print(">>> Running Test 11: MBBS Artifact Serialization & Validation...")
+        methods = ["FF-DF", "FF-F2F", "FF-FS", "FF-NT"]
+        synth_grads = {m: F.normalize(torch.randn(self.P), p=2, dim=0) for m in methods}
+        U_bal, stats = build_subspace_balanced(synth_grads, rank=2, steps=10, seed=1024)
+
+        artifact = SubspaceArtifact(
+            U=U_bal,
+            rank=2,
+            subspace_method="balanced_subspace",
+            backbone_name="clip_vit",
+            tuning_strategy="all_bias",
+            parameter_specs=[s.to_dict() for s in self.specs],
+            total_bias_params=self.P,
+            methods=methods,
+            gradient_cosine_matrix=torch.eye(4),
+            singular_values=stats["singular_values"],
+            explained_energy=stats["final_mean"] / 100.0,
+            batches_per_method=10,
+            seed=1024,
+            objective="mean_variance",
+            beta=1.0,
+            optimization_steps=10,
+            optimization_lr=0.01,
+            coverage_per_method=stats["final_coverage"],
+            mean_coverage=stats["final_mean"],
+            min_coverage=stats["final_min"],
+            std_coverage=stats["final_std"],
+            svd_initial_coverage=stats["svd_initial_coverage"]
+        )
+
+        test_file = "./test_balanced_artifact.pt"
+        try:
+            artifact.save(test_file)
+            reloaded = SubspaceArtifact.load(test_file, validate_specs=self.specs)
+            self.assertEqual(reloaded.subspace_method, "balanced_subspace")
+            self.assertEqual(reloaded.objective, "mean_variance")
+            self.assertEqual(reloaded.rank, 2)
+            self.assertIsNotNone(reloaded.coverage_per_method)
+            self.assertIsNotNone(reloaded.svd_initial_coverage)
+            self.assertEqual(reloaded.U.shape, (self.P, 2))
+        finally:
+            if os.path.exists(test_file):
+                os.remove(test_file)
+
+        print("  [PASS] Test 11: MBBS artifact serialization and deserialization verified.")
 
 
 if __name__ == "__main__":

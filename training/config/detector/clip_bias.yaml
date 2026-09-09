@@ -28,9 +28,17 @@ bias_subspace:
 bias_subspace_estimation:
   batches_per_method: 25
   balanced_real_fake: true
-  method: shared_svd
+  method: shared_svd  # shared_svd, mean_direction, balanced_subspace
   rank: 2
   seed: 1024
+  balanced_subspace:
+    rank: 2
+    beta: 1.0
+    lr: 0.01
+    steps: 1000
+    seed: 1024
+    objective: mean_variance  # mean_variance, soft_min
+    temperature: 0.1
 
 # dataset
 all_dataset: [FaceForensics++, FF-F2F, FF-DF, FF-FS, FF-NT, FaceShifter, DeepFakeDetection, Celeb-DF-v1, Celeb-DF-v2, DFDCP, DFDC, DeeperForensics-1.0, UADFV]
