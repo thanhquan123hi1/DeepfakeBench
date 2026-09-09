@@ -52,6 +52,8 @@ parser.add_argument('--task_target', type=str, default="", help='specify the tar
 parser.add_argument('--weights_path', type=str, default=None, help='Path to pretrained weights (overrides config)')
 parser.add_argument('--tuning', type=str, default=None, help='Tuning strategy (e.g. all_bias, linear_bias, ln_bias, v_bias, mlp_bias, bias_late, etc.)')
 parser.add_argument('--layer_range', type=str, default=None, help='Layer range for tuning (e.g. all, early, middle, late, 16-23)')
+parser.add_argument('--bias_subspace', type=str, default=None, help='Path to subspace artifact .pt file')
+parser.add_argument('--bias_subspace_lambda', type=float, default=None, help='Subspace regularization weight lambda (default: 0.01)')
 
 args = parser.parse_args()
 torch.cuda.set_device(args.local_rank)
@@ -263,6 +265,17 @@ def main():
             config['tuning']['layer_range'] = args.layer_range
         else:
             config['tuning'] = {'parameter_type': config.get('tuning', 'all_bias'), 'layer_range': args.layer_range}
+
+    # Manipulation-Invariant Bias Subspace (MIBS) overrides via CLI
+    if 'bias_subspace' not in config:
+        config['bias_subspace'] = {}
+    if args.bias_subspace is not None:
+        config['bias_subspace']['enabled'] = True
+        config['bias_subspace']['path'] = args.bias_subspace
+    if args.bias_subspace_lambda is not None:
+        config['bias_subspace']['lambda'] = args.bias_subspace_lambda
+    if args.tuning == 'all_bias_subspace':
+        config['bias_subspace']['enabled'] = True
         
     config['save_ckpt'] = args.save_ckpt
     config['save_feat'] = args.save_feat

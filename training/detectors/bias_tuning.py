@@ -14,6 +14,7 @@ VALID_PARAMETER_TYPES = [
     'frozen',
     'full',
     'all_bias',
+    'all_bias_subspace',
     'linear_bias',
     'ln_bias',
     'attention_bias',
@@ -35,6 +36,10 @@ CATEGORY_MAPPING: Dict[str, Set[str]] = {
     'frozen': set(),
     'full': {'all'},
     'all_bias': {
+        'q_bias', 'k_bias', 'v_bias', 'attn_proj_bias',
+        'mlp_fc1_bias', 'mlp_fc2_bias', 'ln_bias'
+    },
+    'all_bias_subspace': {
         'q_bias', 'k_bias', 'v_bias', 'attn_proj_bias',
         'mlp_fc1_bias', 'mlp_fc2_bias', 'ln_bias'
     },
@@ -362,7 +367,7 @@ def apply_bias_tuning(
         # Handle standard separate bias parameters
         if category in active_categories:
             param.requires_grad = True
-        elif category == 'other_bias' and tuning_config.parameter_type == 'all_bias':
+        elif category == 'other_bias' and tuning_config.parameter_type in ('all_bias', 'all_bias_subspace'):
             param.requires_grad = True
         else:
             param.requires_grad = False

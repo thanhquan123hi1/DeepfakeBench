@@ -94,6 +94,14 @@ while [[ $# -gt 0 ]]; do
       WEIGHTS="$2"
       shift 2
       ;;
+    --subspace)
+      SUBSPACE_PATH="$2"
+      shift 2
+      ;;
+    --lambda)
+      SUBSPACE_LAMBDA="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       ;;
@@ -111,6 +119,12 @@ if [ -n "$LAYER_RANGE" ]; then
 fi
 if [ -n "$WEIGHTS" ]; then
   EXTRA_ARGS+=(--weights_path "$WEIGHTS")
+fi
+if [ -n "$SUBSPACE_PATH" ]; then
+  EXTRA_ARGS+=(--bias_subspace "$SUBSPACE_PATH")
+fi
+if [ -n "$SUBSPACE_LAMBDA" ]; then
+  EXTRA_ARGS+=(--bias_subspace_lambda "$SUBSPACE_LAMBDA")
 fi
 
 echo "================================================================================"

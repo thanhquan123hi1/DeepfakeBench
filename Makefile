@@ -18,6 +18,10 @@ TEST_DATA      ?= Celeb-DF-v2
 LAYER_RANGE    ?= 
 WEIGHTS        ?= 
 PORT           ?= $(shell python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()') 
+RANK           ?= 2
+SUBSPACE_PATH  ?= ./bias_subspace_rank2.pt
+LAMBDA         ?= 0.01
+BATCHES_METHOD ?= 25 
 
 # Extra args builder
 EXTRA_ARGS := 
@@ -115,6 +119,24 @@ train-late-bias:
 .PHONY: train-v-late
 train-v-late:
 	$(MAKE) train-ddp STRATEGY=v_bias LAYER_RANGE=late GPUS=2
+
+.PHONY: train-subspace
+train-subspace:
+	$(MAKE) train-ddp STRATEGY=all_bias_subspace GPUS=2 EXTRA_ARGS="--bias_subspace $(SUBSPACE_PATH) --bias_subspace_lambda $(LAMBDA)"
+
+.PHONY: estimate-subspace
+estimate-subspace:
+	@echo ">>> Estimating Manipulation-Invariant Bias Subspace (MIBS)..."
+	python3 training/estimate_bias_subspace.py \
+		--detector_path $(CONFIG) \
+		--subspace_rank $(RANK) \
+		--batches_per_method $(BATCHES_METHOD) \
+		--output $(SUBSPACE_PATH)
+
+.PHONY: test-subspace
+test-subspace:
+	@echo ">>> Running MIBS Unit Test Suite (9 Tests)..."
+	python3 test_bias_subspace.py
 
 # ------------------------------------------------------------------------------
 # Testing Targets
