@@ -28,6 +28,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from dataset.abstract_dataset import DeepfakeAbstractBaseDataset
+from dataset.pair_dataset import pairDataset
 from detectors.clip_bias_detector import CLIPBiasDetector
 from detectors.bias_subspace import (
     BiasParameterSpec,
@@ -92,33 +93,49 @@ class BalancedBatchSampler:
 
 def collect_method_gradient(
     model: CLIPBiasDetector,
-    dataset: DeepfakeAbstractBaseDataset,
+    dataset,
     method_name: str,
     bias_specs: List[BiasParameterSpec],
     batches_per_method: int,
     batch_size: int,
     device: torch.device,
+    is_pair: bool = False,
     seed: int = 1024,
     eps: float = 1e-8
 ) -> torch.Tensor:
     """
     Collects and normalizes the mean gradient for a specific manipulation method over K balanced batches.
+    Supports both standard BalancedBatchSampler and pairDataset.
     """
-    logger.info(f"===> Collecting gradients for method: '{method_name}' ({batches_per_method} balanced batches)")
+    logger.info(f"===> Collecting gradients for method: '{method_name}' ({batches_per_method} balanced batches, is_pair={is_pair})")
 
-    sampler = BalancedBatchSampler(
-        dataset=dataset,
-        batch_size=batch_size,
-        num_batches=batches_per_method,
-        seed=seed
-    )
-    dataloader = DataLoader(
-        dataset,
-        batch_sampler=sampler,
-        num_workers=2,
-        collate_fn=dataset.collate_fn,
-        pin_memory=True if device.type == 'cuda' else False
-    )
+    if is_pair:
+        pair_bs = batch_size if batch_size <= 8 else batch_size // 2
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=pair_bs,
+            shuffle=True,
+            generator=generator,
+            num_workers=2,
+            collate_fn=dataset.collate_fn,
+            pin_memory=True if device.type == 'cuda' else False
+        )
+    else:
+        sampler = BalancedBatchSampler(
+            dataset=dataset,
+            batch_size=batch_size,
+            num_batches=batches_per_method,
+            seed=seed
+        )
+        dataloader = DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            num_workers=2,
+            collate_fn=dataset.collate_fn,
+            pin_memory=True if device.type == 'cuda' else False
+        )
 
     loss_fn = nn.CrossEntropyLoss()
     accumulated_grad = None
@@ -127,6 +144,8 @@ def collect_method_gradient(
     model.eval()  # Keep batchnorm/dropout deterministic if any
 
     for step, batch_data in enumerate(dataloader):
+        if step >= batches_per_method:
+            break
         # Move batch data to device
         for key in batch_data:
             if batch_data[key] is not None and key != 'name':
@@ -180,6 +199,7 @@ def main():
     parser.add_argument("--output", type=str, default="./bias_subspace_rank2.pt")
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--dataset_type", type=str, default=None, choices=["standard", "pair"], help="Override dataset_type: standard or pair")
     # Balanced subspace (MBBS) arguments
     parser.add_argument("--balanced_beta", type=float, default=1.0, help="Weight for variance penalty in mean_variance")
     parser.add_argument("--balanced_lr", type=float, default=0.01, help="Learning rate for Adam optimizer")
@@ -192,17 +212,6 @@ def main():
     set_seed(args.seed)
     device = torch.device(args.device)
 
-    logger.info("=" * 80)
-    logger.info("  MANIPULATION-INVARIANT BIAS SUBSPACE (MIBS) - ESTIMATION PIPELINE")
-    logger.info(f"  Detector Config : {args.detector_path}")
-    parser_info = f"Rank: {args.subspace_rank} | Method: {args.subspace_method} | Batches/Method: {args.batches_per_method} | BatchSize: {args.batch_size}"
-    logger.info(f"  Configuration   : {parser_info}")
-    if args.subspace_method == "balanced_subspace":
-        logger.info(f"  Balanced Specs  : Objective: {args.balanced_objective} | Beta: {args.balanced_beta} | LR: {args.balanced_lr} | Steps: {args.balanced_steps}")
-    logger.info(f"  Output Artifact : {args.output}")
-    logger.info(f"  Device          : {device}")
-    logger.info("=" * 80)
-
     # 1. Load configuration
     with open(args.detector_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -211,8 +220,22 @@ def main():
             train_cfg = yaml.safe_load(f)
             config.update(train_cfg)
 
+    dataset_type = args.dataset_type or config.get('dataset_type', 'standard')
+    is_pair = (dataset_type == 'pair')
+    config['dataset_type'] = dataset_type
     config['tuning'] = args.tuning
     config['train_batchSize'] = args.batch_size
+
+    logger.info("=" * 80)
+    logger.info("  MANIPULATION-INVARIANT BIAS SUBSPACE (MIBS) - ESTIMATION PIPELINE")
+    logger.info(f"  Detector Config : {args.detector_path}")
+    parser_info = f"Rank: {args.subspace_rank} | Method: {args.subspace_method} | Batches/Method: {args.batches_per_method} | BatchSize: {args.batch_size} | Dataset: {dataset_type}"
+    logger.info(f"  Configuration   : {parser_info}")
+    if args.subspace_method == "balanced_subspace":
+        logger.info(f"  Balanced Specs  : Objective: {args.balanced_objective} | Beta: {args.balanced_beta} | LR: {args.balanced_lr} | Steps: {args.balanced_steps}")
+    logger.info(f"  Output Artifact : {args.output}")
+    logger.info(f"  Device          : {device}")
+    logger.info("=" * 80)
 
     # 2. Build model with all_bias enabled
     logger.info("Initializing CLIP ViT-L/14 model with strategy='all_bias'...")
@@ -254,8 +277,12 @@ def main():
             method_config = dict(config)
             method_config['train_dataset'] = [method_name]
 
-            dataset = DeepfakeAbstractBaseDataset(config=method_config, mode='train')
-            logger.info(f"Loaded dataset for {method_name}: {len(dataset)} samples (Real + {method_name})")
+            if is_pair:
+                dataset = pairDataset(config=method_config, mode='train')
+                logger.info(f"Loaded pairDataset for {method_name}: {len(dataset)} pairs ({len(dataset)*2} frames)")
+            else:
+                dataset = DeepfakeAbstractBaseDataset(config=method_config, mode='train')
+                logger.info(f"Loaded dataset for {method_name}: {len(dataset)} samples (Real + {method_name})")
 
             g_tilde = collect_method_gradient(
                 model=model,
@@ -265,6 +292,7 @@ def main():
                 batches_per_method=args.batches_per_method,
                 batch_size=args.batch_size,
                 device=device,
+                is_pair=is_pair,
                 seed=args.seed
             )
             method_gradients[method_name] = g_tilde
