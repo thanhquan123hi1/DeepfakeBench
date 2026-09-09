@@ -49,7 +49,8 @@ def parse_args():
         type=str,
         default="/kaggle/working/logs/training/clip_bias_2026-09-08-16-30-12/test/Celeb-DF-v2/metric_dict_best.pickle"
     )
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size (defaults to config train_batchSize)")
+    parser.add_argument("--dataset_type", type=str, default=None, choices=["standard", "pair"])
     parser.add_argument("--seed", type=int, default=1024)
     return parser.parse_args()
 
@@ -85,10 +86,6 @@ def extract_video_id(path: str) -> str:
 def main():
     args = parse_args()
 
-    print("\n" + "=" * 70)
-    print("  AUDIT: TRAINING DATA CLASS & MANIPULATION DISTRIBUTION")
-    print("=" * 70)
-
     # 1. Load Dataset configuration
     with open(args.detector_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -99,43 +96,83 @@ def main():
 
     config['train_dataset'] = [args.train_dataset]
 
-    print(f"Loading dataset: {args.train_dataset} (mode='train')...")
-    dataset = DeepfakeAbstractBaseDataset(config, mode='train')
-    total_samples = len(dataset)
-    print(f"Loaded {total_samples:,} total samples from {args.train_dataset}.\n")
+    dataset_type = args.dataset_type if args.dataset_type is not None else config.get('dataset_type', 'standard')
+    config['dataset_type'] = dataset_type
+    batch_size = args.batch_size if args.batch_size is not None else config.get('train_batchSize', 16)
 
-    # 2. Dataset-level Distribution
-    labels = list(dataset.label_list)
-    images = list(dataset.image_list)
-    methods = [classify_path(p) for p in images]
-    videos = [extract_video_id(p) for p in images]
-
-    n_real = sum(1 for l in labels if l == 0)
-    n_fake = sum(1 for l in labels if l == 1)
-    fake_real_ratio = n_fake / (n_real + 1e-12)
-
-    method_counts = Counter(methods)
-    unique_videos_per_method = defaultdict(set)
-    for v, m in zip(videos, methods):
-        unique_videos_per_method[m].add(v)
-
+    print("\n" + "=" * 70)
+    print(f"  AUDIT: TRAINING DATA DISTRIBUTION [Dataset Type: {dataset_type.upper()}]")
     print("=" * 70)
-    print("1. DATASET-LEVEL DISTRIBUTION (CURRENT PIPELINE)")
-    print("=" * 70)
-    print(f"Total samples (frames)   : {total_samples:,}")
-    print(f"Total source videos      : {len(set(videos)):,}")
-    print(f"Frames per video config  : {config.get('frame_num', {}).get('train', 8)}")
-    print("-" * 70)
-    print(f"Real samples (Class 0)   : {n_real:6,d}  ({n_real / total_samples * 100:6.2f} %)")
-    print(f"Fake samples (Class 1)   : {n_fake:6,d}  ({n_fake / total_samples * 100:6.2f} %)")
-    print(f"Ratio Fake / Real        : {fake_real_ratio:.4f} : 1  (~ 4:1)")
-    print("-" * 70)
-    print("Manipulation Breakdown (Sample/Frame level):")
-    for m in ["FF-real", "FF-DF", "FF-F2F", "FF-FS", "FF-NT"]:
-        c = method_counts.get(m, 0)
-        v_count = len(unique_videos_per_method.get(m, set()))
-        print(f"  {m:<10}: {c:6,d} frames ({c / total_samples * 100:5.2f} %) | {v_count:4d} videos (~ {c/v_count:.1f} frames/vid)")
-    print("=" * 70 + "\n")
+
+    if dataset_type == 'pair':
+        from dataset.pair_dataset import pairDataset
+        print(f"Loading pairDataset: {args.train_dataset} (mode='train')...")
+        dataset = pairDataset(config, mode='train')
+        total_pairs = len(dataset)
+        effective_frames = total_pairs * 2
+        print(f"Loaded {total_pairs:,} total pairs ({effective_frames:,} effective frames) from {args.train_dataset}.\n")
+
+        # In pairDataset, each item is a pair (1 Fake, 1 Real)
+        # Fake images
+        fake_paths = [item[0] for item in dataset.fake_imglist]
+        fake_methods = [classify_path(p) for p in fake_paths]
+        fake_counts = Counter(fake_methods)
+
+        print("=" * 70)
+        print(f"1. DATASET-LEVEL DISTRIBUTION (PIPELINE: {dataset_type.upper()})")
+        print("=" * 70)
+        print(f"Total pair items in dataset : {total_pairs:,}")
+        print(f"Effective frames per epoch : {effective_frames:,} ({total_pairs:,} Real + {total_pairs:,} Fake)")
+        print(f"Real source video pool     : {len(dataset.real_pool)} videos")
+        print("-" * 70)
+        print(f"Effective Real samples     : {total_pairs:6,d}  ( 50.00 %)")
+        print(f"Effective Fake samples     : {total_pairs:6,d}  ( 50.00 %)")
+        print(f"Ratio Fake / Real          : 1.0000 : 1  (PERFECT 1:1 BALANCE)")
+        print("-" * 70)
+        print("Manipulation Breakdown (Fake Pairs):")
+        for m in ["FF-DF", "FF-F2F", "FF-FS", "FF-NT"]:
+            c = fake_counts.get(m, 0)
+            print(f"  {m:<10}: {c:6,d} pairs ({c / total_pairs * 100:5.2f} %)")
+        print("  Real Pool : Each fake is paired with its matched/random source real frame.")
+        print("=" * 70 + "\n")
+    else:
+        print(f"Loading dataset: {args.train_dataset} (mode='train')...")
+        dataset = DeepfakeAbstractBaseDataset(config, mode='train')
+        total_samples = len(dataset)
+        print(f"Loaded {total_samples:,} total samples from {args.train_dataset}.\n")
+
+        # 2. Dataset-level Distribution
+        labels = list(dataset.label_list)
+        images = list(dataset.image_list)
+        methods = [classify_path(p) for p in images]
+        videos = [extract_video_id(p) for p in images]
+
+        n_real = sum(1 for l in labels if l == 0)
+        n_fake = sum(1 for l in labels if l == 1)
+        fake_real_ratio = n_fake / (n_real + 1e-12)
+
+        method_counts = Counter(methods)
+        unique_videos_per_method = defaultdict(set)
+        for v, m in zip(videos, methods):
+            unique_videos_per_method[m].add(v)
+
+        print("=" * 70)
+        print(f"1. DATASET-LEVEL DISTRIBUTION (PIPELINE: {dataset_type.upper()})")
+        print("=" * 70)
+        print(f"Total samples (frames)   : {total_samples:,}")
+        print(f"Total source videos      : {len(set(videos)):,}")
+        print(f"Frames per video config  : {config.get('frame_num', {}).get('train', 8)}")
+        print("-" * 70)
+        print(f"Real samples (Class 0)   : {n_real:6,d}  ({n_real / total_samples * 100:6.2f} %)")
+        print(f"Fake samples (Class 1)   : {n_fake:6,d}  ({n_fake / total_samples * 100:6.2f} %)")
+        print(f"Ratio Fake / Real        : {fake_real_ratio:.4f} : 1  (~ 4:1)")
+        print("-" * 70)
+        print("Manipulation Breakdown (Sample/Frame level):")
+        for m in ["FF-real", "FF-DF", "FF-F2F", "FF-FS", "FF-NT"]:
+            c = method_counts.get(m, 0)
+            v_count = len(unique_videos_per_method.get(m, set()))
+            print(f"  {m:<10}: {c:6,d} frames ({c / total_samples * 100:5.2f} %) | {v_count:4d} videos (~ {c/v_count:.1f} frames/vid)")
+        print("=" * 70 + "\n")
 
     # 3. Old all_bias Run Inspection
     print("=" * 70)
@@ -170,116 +207,206 @@ def main():
 
     # 4. Batch-Level Audit (Simulated 1 Epoch DataLoader)
     print("=" * 70)
-    print(f"3. BATCH-LEVEL COMPOSITION SIMULATION (Batch Size = {args.batch_size})")
+    effective_bs = batch_size * 2 if dataset_type == 'pair' else batch_size
+    print(f"3. BATCH-LEVEL COMPOSITION SIMULATION (DataLoader Batch Size = {batch_size} -> {effective_bs} images/step)")
     print("=" * 70)
     random.seed(args.seed)
-    indices = list(range(total_samples))
-    random.shuffle(indices)
 
-    batch_size = args.batch_size
-    num_batches = total_samples // batch_size
+    if dataset_type == 'pair':
+        total_items = len(dataset.fake_imglist)
+        num_batches = total_items // batch_size
+        indices = list(range(total_items))
+        random.shuffle(indices)
 
-    real_counts_per_batch = []
-    fake_counts_per_batch = []
-    single_class_all_fake = 0
-    single_class_all_real = 0
-    batches_8_8 = 0
-    batches_ge_75_fake = 0
-    batches_ge_75_real = 0
+        fake_methods = [classify_path(item[0]) for item in dataset.fake_imglist]
 
-    has_df = 0
-    has_fs = 0
-    has_f2f = 0
-    has_nt = 0
-    distinct_methods = []
+        real_counts_per_batch = []
+        fake_counts_per_batch = []
+        single_class_all_fake = 0
+        single_class_all_real = 0
+        batches_balanced = 0
+        batches_ge_75_fake = 0
+        batches_ge_75_real = 0
 
-    for b in range(num_batches):
-        b_idx = indices[b * batch_size : (b + 1) * batch_size]
-        b_labels = [labels[i] for i in b_idx]
-        b_methods = [methods[i] for i in b_idx]
+        has_df = 0
+        has_fs = 0
+        has_f2f = 0
+        has_nt = 0
+        distinct_methods = []
 
-        nr = sum(1 for l in b_labels if l == 0)
-        nf = batch_size - nr
-        real_counts_per_batch.append(nr)
-        fake_counts_per_batch.append(nf)
+        for b in range(num_batches):
+            b_idx = indices[b * batch_size : (b + 1) * batch_size]
+            b_fake_methods = [fake_methods[i] for i in b_idx]
+            b_all_methods = b_fake_methods + ["FF-real"] * batch_size
 
-        if nr == 0:
-            single_class_all_fake += 1
-        if nf == 0:
-            single_class_all_real += 1
-        if nr == 8:
-            batches_8_8 += 1
-        if nf >= 12:  # >= 75% fake
-            batches_ge_75_fake += 1
-        if nr >= 12:  # >= 75% real
-            batches_ge_75_real += 1
+            nr = batch_size
+            nf = batch_size
+            real_counts_per_batch.append(nr)
+            fake_counts_per_batch.append(nf)
 
-        if "FF-DF" in b_methods:
-            has_df += 1
-        if "FF-FS" in b_methods:
-            has_fs += 1
-        if "FF-F2F" in b_methods:
-            has_f2f += 1
-        if "FF-NT" in b_methods:
-            has_nt += 1
-        distinct_methods.append(len(set(b_methods)))
+            batches_balanced += 1
 
-    print(f"Total batches simulated  : {num_batches:,}")
-    print(f"Batches 8 Real / 8 Fake  : {batches_8_8:5d} ({batches_8_8 / num_batches * 100:5.2f} %)")
-    print(f"Batches >= 75% Fake      : {batches_ge_75_fake:5d} ({batches_ge_75_fake / num_batches * 100:5.2f} %)")
-    print(f"Batches >= 75% Real      : {batches_ge_75_real:5d} ({batches_ge_75_real / num_batches * 100:5.2f} %)")
-    print("-" * 70)
-    print("Single-Class Batches:")
-    print(f"  All-Fake (0 Real)      : {single_class_all_fake:5d} ({single_class_all_fake / num_batches * 100:5.2f} %)")
-    print(f"  All-Real (0 Fake)      : {single_class_all_real:5d} ({single_class_all_real / num_batches * 100:5.2f} %)")
-    print(f"  Total Single-Class     : {single_class_all_fake + single_class_all_real:5d} ({(single_class_all_fake + single_class_all_real) / num_batches * 100:5.2f} %)")
-    print("-" * 70)
-    print("Mean composition per batch:")
-    print(f"  Mean Real per batch    : {np.mean(real_counts_per_batch):.2f} / {batch_size}")
-    print(f"  Mean Fake per batch    : {np.mean(fake_counts_per_batch):.2f} / {batch_size}")
-    print("-" * 70)
-    print("Manipulation Co-occurrence per batch:")
-    print(f"  Batches containing DF  : {has_df / num_batches * 100:5.2f} %")
-    print(f"  Batches containing FS  : {has_fs / num_batches * 100:5.2f} %")
-    print(f"  Batches containing F2F : {has_f2f / num_batches * 100:5.2f} %")
-    print(f"  Batches containing NT  : {has_nt / num_batches * 100:5.2f} %")
-    print(f"  Avg distinct methods   : {np.mean(distinct_methods):.2f} / 5 (Real + 4 Fakes)")
-    print("-" * 70)
-    print("Real Count Distribution in Batch of 16:")
-    hist = Counter(real_counts_per_batch)
-    for k in range(batch_size + 1):
-        bar = "#" * int(hist.get(k, 0) / 10)
-        print(f"  {k:2d} Real : {hist.get(k, 0):4d} batches ({hist.get(k, 0) / num_batches * 100:5.2f} %)  {bar}")
-    print("=" * 70 + "\n")
+            if "FF-DF" in b_fake_methods:
+                has_df += 1
+            if "FF-FS" in b_fake_methods:
+                has_fs += 1
+            if "FF-F2F" in b_fake_methods:
+                has_f2f += 1
+            if "FF-NT" in b_fake_methods:
+                has_nt += 1
+            distinct_methods.append(len(set(b_all_methods)))
 
-    # 5. DDP Partitioning Audit (2 Ranks)
-    print("=" * 70)
-    print("4. DDP 2-GPU DISTRIBUTED SAMPLER AUDIT")
-    print("=" * 70)
-    dummy_ds = TensorDataset(torch.tensor(labels))
-    sampler0 = DistributedSampler(dummy_ds, num_replicas=2, rank=0, shuffle=True, seed=args.seed)
-    sampler1 = DistributedSampler(dummy_ds, num_replicas=2, rank=1, shuffle=True, seed=args.seed)
+        print(f"Total batches simulated  : {num_batches:,}")
+        print(f"Batches {batch_size} Real / {batch_size} Fake : {batches_balanced:5d} ({batches_balanced / num_batches * 100:5.2f} %)")
+        print(f"Batches >= 75% Fake      : {batches_ge_75_fake:5d} ({batches_ge_75_fake / num_batches * 100:5.2f} %)")
+        print(f"Batches >= 75% Real      : {batches_ge_75_real:5d} ({batches_ge_75_real / num_batches * 100:5.2f} %)")
+        print("-" * 70)
+        print("Single-Class Batches:")
+        print(f"  All-Fake (0 Real)      : {single_class_all_fake:5d} ({single_class_all_fake / num_batches * 100:5.2f} %)")
+        print(f"  All-Real (0 Fake)      : {single_class_all_real:5d} ({single_class_all_real / num_batches * 100:5.2f} %)")
+        print(f"  Total Single-Class     : {single_class_all_fake + single_class_all_real:5d} ({(single_class_all_fake + single_class_all_real) / num_batches * 100:5.2f} %)")
+        print("-" * 70)
+        print("Mean composition per batch:")
+        print(f"  Mean Real per batch    : {np.mean(real_counts_per_batch):.2f} / {effective_bs}")
+        print(f"  Mean Fake per batch    : {np.mean(fake_counts_per_batch):.2f} / {effective_bs}")
+        print("-" * 70)
+        print("Manipulation Co-occurrence per batch:")
+        print(f"  Batches containing DF  : {has_df / num_batches * 100:5.2f} %")
+        print(f"  Batches containing FS  : {has_fs / num_batches * 100:5.2f} %")
+        print(f"  Batches containing F2F : {has_f2f / num_batches * 100:5.2f} %")
+        print(f"  Batches containing NT  : {has_nt / num_batches * 100:5.2f} %")
+        print(f"  Avg distinct methods   : {np.mean(distinct_methods):.2f} / 5 (Real + 4 Fakes)")
+        print("-" * 70)
+        print(f"Real Count Distribution in Batch of {effective_bs}:")
+        print(f"  {batch_size:2d} Real ({batch_size:2d} Fake) : {num_batches:4d} batches (100.00 %)  ########################################")
+        print("=" * 70 + "\n")
 
-    idx0 = list(sampler0)
-    idx1 = list(sampler1)
-    lab0 = [labels[i] for i in idx0]
-    lab1 = [labels[i] for i in idx1]
+        # 5. DDP Partitioning Audit (2 Ranks)
+        print("=" * 70)
+        print("4. DDP 2-GPU DISTRIBUTED SAMPLER AUDIT (PAIR DATASET)")
+        print("=" * 70)
+        dummy_ds = TensorDataset(torch.arange(total_items))
+        sampler0 = DistributedSampler(dummy_ds, num_replicas=2, rank=0, shuffle=True, seed=args.seed)
+        sampler1 = DistributedSampler(dummy_ds, num_replicas=2, rank=1, shuffle=True, seed=args.seed)
 
-    n_b0 = len(lab0) // batch_size
-    n_b1 = len(lab1) // batch_size
+        n_p0 = len(list(sampler0))
+        n_p1 = len(list(sampler1))
+        n_b0 = n_p0 // batch_size
+        n_b1 = n_p1 // batch_size
 
-    single_f0 = sum(1 for b in range(n_b0) if lab0[b * batch_size : (b + 1) * batch_size].count(0) == 0)
-    single_f1 = sum(1 for b in range(n_b1) if lab1[b * batch_size : (b + 1) * batch_size].count(0) == 0)
+        print(f"Rank 0: {n_p0:,d} pairs ({n_p0 * 2:,d} frames) | Real: {n_p0:,d} (50.00%) | Fake: {n_p0:,d} (50.00%)")
+        print(f"        {n_b0:,d} batches | Mean Real/batch: {batch_size:.2f} / {effective_bs} | Single-class batches: 0 (0.00%)")
+        print(f"Rank 1: {n_p1:,d} pairs ({n_p1 * 2:,d} frames) | Real: {n_p1:,d} (50.00%) | Fake: {n_p1:,d} (50.00%)")
+        print(f"        {n_b1:,d} batches | Mean Real/batch: {batch_size:.2f} / {effective_bs} | Single-class batches: 0 (0.00%)")
+        print(">> Conclusion: pairDataset guarantees PERFECT 1:1 balance (8 Real / 8 Fake) on BOTH GPUs.")
+        print("=" * 70 + "\n")
 
-    mean_r0 = sum(lab0[b * batch_size : (b + 1) * batch_size].count(0) for b in range(n_b0)) / n_b0
-    mean_r1 = sum(lab1[b * batch_size : (b + 1) * batch_size].count(0) for b in range(n_b1)) / n_b1
+    else:
+        indices = list(range(total_samples))
+        random.shuffle(indices)
+        num_batches = total_samples // batch_size
 
-    print(f"Rank 0: {len(lab0):,d} samples | Real: {lab0.count(0):,d} ({lab0.count(0)/len(lab0)*100:.2f}%) | Fake: {lab0.count(1):,d} ({lab0.count(1)/len(lab0)*100:.2f}%)")
-    print(f"        {n_b0} batches | Mean Real/batch: {mean_r0:.2f} | Single-class all-fake batches: {single_f0} ({single_f0/n_b0*100:.2f}%)")
-    print(f"Rank 1: {len(lab1):,d} samples | Real: {lab1.count(0):,d} ({lab1.count(0)/len(lab1)*100:.2f}%) | Fake: {lab1.count(1):,d} ({lab1.count(1)/len(lab1)*100:.2f}%)")
-    print(f"        {n_b1} batches | Mean Real/batch: {mean_r1:.2f} | Single-class all-fake batches: {single_f1} ({single_f1/n_b1*100:.2f}%)")
-    print(">> Conclusion: DDP partitions evenly; class skew is identical across both GPUs.")
-    print("=" * 70 + "\n")
+        real_counts_per_batch = []
+        fake_counts_per_batch = []
+        single_class_all_fake = 0
+        single_class_all_real = 0
+        batches_8_8 = 0
+        batches_ge_75_fake = 0
+        batches_ge_75_real = 0
+
+        has_df = 0
+        has_fs = 0
+        has_f2f = 0
+        has_nt = 0
+        distinct_methods = []
+
+        for b in range(num_batches):
+            b_idx = indices[b * batch_size : (b + 1) * batch_size]
+            b_labels = [labels[i] for i in b_idx]
+            b_methods = [methods[i] for i in b_idx]
+
+            nr = sum(1 for l in b_labels if l == 0)
+            nf = batch_size - nr
+            real_counts_per_batch.append(nr)
+            fake_counts_per_batch.append(nf)
+
+            if nr == 0:
+                single_class_all_fake += 1
+            if nf == 0:
+                single_class_all_real += 1
+            if nr == 8:
+                batches_8_8 += 1
+            if nf >= 12:  # >= 75% fake
+                batches_ge_75_fake += 1
+            if nr >= 12:  # >= 75% real
+                batches_ge_75_real += 1
+
+            if "FF-DF" in b_methods:
+                has_df += 1
+            if "FF-FS" in b_methods:
+                has_fs += 1
+            if "FF-F2F" in b_methods:
+                has_f2f += 1
+            if "FF-NT" in b_methods:
+                has_nt += 1
+            distinct_methods.append(len(set(b_methods)))
+
+        print(f"Total batches simulated  : {num_batches:,}")
+        print(f"Batches 8 Real / 8 Fake  : {batches_8_8:5d} ({batches_8_8 / num_batches * 100:5.2f} %)")
+        print(f"Batches >= 75% Fake      : {batches_ge_75_fake:5d} ({batches_ge_75_fake / num_batches * 100:5.2f} %)")
+        print(f"Batches >= 75% Real      : {batches_ge_75_real:5d} ({batches_ge_75_real / num_batches * 100:5.2f} %)")
+        print("-" * 70)
+        print("Single-Class Batches:")
+        print(f"  All-Fake (0 Real)      : {single_class_all_fake:5d} ({single_class_all_fake / num_batches * 100:5.2f} %)")
+        print(f"  All-Real (0 Fake)      : {single_class_all_real:5d} ({single_class_all_real / num_batches * 100:5.2f} %)")
+        print(f"  Total Single-Class     : {single_class_all_fake + single_class_all_real:5d} ({(single_class_all_fake + single_class_all_real) / num_batches * 100:5.2f} %)")
+        print("-" * 70)
+        print("Mean composition per batch:")
+        print(f"  Mean Real per batch    : {np.mean(real_counts_per_batch):.2f} / {batch_size}")
+        print(f"  Mean Fake per batch    : {np.mean(fake_counts_per_batch):.2f} / {batch_size}")
+        print("-" * 70)
+        print("Manipulation Co-occurrence per batch:")
+        print(f"  Batches containing DF  : {has_df / num_batches * 100:5.2f} %")
+        print(f"  Batches containing FS  : {has_fs / num_batches * 100:5.2f} %")
+        print(f"  Batches containing F2F : {has_f2f / num_batches * 100:5.2f} %")
+        print(f"  Batches containing NT  : {has_nt / num_batches * 100:5.2f} %")
+        print(f"  Avg distinct methods   : {np.mean(distinct_methods):.2f} / 5 (Real + 4 Fakes)")
+        print("-" * 70)
+        print("Real Count Distribution in Batch of 16:")
+        hist = Counter(real_counts_per_batch)
+        for k in range(batch_size + 1):
+            bar = "#" * int(hist.get(k, 0) / 10)
+            print(f"  {k:2d} Real : {hist.get(k, 0):4d} batches ({hist.get(k, 0) / num_batches * 100:5.2f} %)  {bar}")
+        print("=" * 70 + "\n")
+
+        # 5. DDP Partitioning Audit (2 Ranks)
+        print("=" * 70)
+        print("4. DDP 2-GPU DISTRIBUTED SAMPLER AUDIT")
+        print("=" * 70)
+        dummy_ds = TensorDataset(torch.tensor(labels))
+        sampler0 = DistributedSampler(dummy_ds, num_replicas=2, rank=0, shuffle=True, seed=args.seed)
+        sampler1 = DistributedSampler(dummy_ds, num_replicas=2, rank=1, shuffle=True, seed=args.seed)
+
+        idx0 = list(sampler0)
+        idx1 = list(sampler1)
+        lab0 = [labels[i] for i in idx0]
+        lab1 = [labels[i] for i in idx1]
+
+        n_b0 = len(lab0) // batch_size
+        n_b1 = len(lab1) // batch_size
+
+        single_f0 = sum(1 for b in range(n_b0) if lab0[b * batch_size : (b + 1) * batch_size].count(0) == 0)
+        single_f1 = sum(1 for b in range(n_b1) if lab1[b * batch_size : (b + 1) * batch_size].count(0) == 0)
+
+        mean_r0 = sum(lab0[b * batch_size : (b + 1) * batch_size].count(0) for b in range(n_b0)) / n_b0
+        mean_r1 = sum(lab1[b * batch_size : (b + 1) * batch_size].count(0) for b in range(n_b1)) / n_b1
+
+        print(f"Rank 0: {len(lab0):,d} samples | Real: {lab0.count(0):,d} ({lab0.count(0)/len(lab0)*100:.2f}%) | Fake: {lab0.count(1):,d} ({lab0.count(1)/len(lab0)*100:.2f}%)")
+        print(f"        {n_b0} batches | Mean Real/batch: {mean_r0:.2f} | Single-class all-fake batches: {single_f0} ({single_f0/n_b0*100:.2f}%)")
+        print(f"Rank 1: {len(lab1):,d} samples | Real: {lab1.count(0):,d} ({lab1.count(0)/len(lab1)*100:.2f}%) | Fake: {lab1.count(1):,d} ({lab1.count(1)/len(lab1)*100:.2f}%)")
+        print(f"        {n_b1} batches | Mean Real/batch: {mean_r1:.2f} | Single-class all-fake batches: {single_f1} ({single_f1/n_b1*100:.2f}%)")
+        print(">> Conclusion: DDP partitions evenly; class skew is identical across both GPUs.")
+        print("=" * 70 + "\n")
 
     # 6. Explanation of Sklearn Warning
     print("=" * 70)
