@@ -357,6 +357,37 @@ def build_subspace_mean(
     return U, singular_values, explained_energy
 
 
+def compute_method_projection_energies(
+    U: torch.Tensor,
+    method_gradients: Dict[str, torch.Tensor],
+    eps: float = 1e-12
+) -> Dict[str, float]:
+    """
+    Computes projection energy ratio R_m = ||U^T g_m||^2 / ||g_m||^2 for each manipulation method.
+
+    Formula:
+        R_m = (||U^T g_m||_2^2 / ||g_m||_2^2) * 100.0  (in percentage)
+
+    Args:
+        U: 2D tensor of shape [P, r] with orthonormal columns.
+        method_gradients: Mapping of method name to gradient vector [P].
+        eps: Epsilon to prevent division by zero.
+
+    Returns:
+        Dict mapping method_name -> percentage (float between 0.0 and 100.0).
+    """
+    energies: Dict[str, float] = {}
+    U_f32 = U.detach().cpu().to(torch.float32)
+    for m, g in method_gradients.items():
+        g_f32 = g.detach().cpu().to(torch.float32)
+        coeff = torch.matmul(U_f32.t(), g_f32)
+        proj_sq = (coeff ** 2).sum().item()
+        total_sq = (g_f32 ** 2).sum().item()
+        r_m = (proj_sq / (total_sq + eps)) * 100.0
+        energies[m] = float(r_m)
+    return energies
+
+
 @dataclass
 class SubspaceArtifact:
     """
@@ -376,6 +407,7 @@ class SubspaceArtifact:
     batches_per_method: int
     seed: int
     mean_gradients: Optional[Dict[str, torch.Tensor]] = None
+    projection_energies: Optional[Dict[str, float]] = None
 
     def save(self, filepath: str) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
@@ -396,6 +428,8 @@ class SubspaceArtifact:
         }
         if self.mean_gradients:
             data["mean_gradients"] = {k: v.cpu() for k, v in self.mean_gradients.items()}
+        if self.projection_energies:
+            data["projection_energies"] = self.projection_energies
         torch.save(data, filepath)
         logger.info(f"Subspace artifact saved successfully to {filepath}")
 
@@ -439,7 +473,8 @@ class SubspaceArtifact:
             explained_energy=data.get("explained_energy", 1.0),
             batches_per_method=data.get("batches_per_method", 0),
             seed=data.get("seed", 0),
-            mean_gradients=data.get("mean_gradients", None)
+            mean_gradients=data.get("mean_gradients", None),
+            projection_energies=data.get("projection_energies", None)
         )
 
         # Strict validation against current model specs if requested

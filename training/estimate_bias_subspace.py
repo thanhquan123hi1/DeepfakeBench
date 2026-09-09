@@ -34,6 +34,7 @@ from detectors.bias_subspace import (
     get_ordered_bias_specs,
     flatten_bias_gradients,
     compute_gradient_cosine_matrix,
+    compute_method_projection_energies,
     build_subspace_svd,
     build_subspace_mean,
     SubspaceArtifact,
@@ -286,7 +287,17 @@ def main():
     print(f"  Orthonormality Err  : {max_ortho_err:.2e} (max |U.T @ U - I|)")
     print("=" * 60 + "\n")
 
-    # 7. Save artifact
+    # 7. Method projection energy diagnostics: R_m = ||U^T g_m||^2 / ||g_m||^2
+    projection_energies = compute_method_projection_energies(U_shared, method_gradients)
+    print("=" * 60)
+    print(f"  PROJECTION ENERGY ONTO U (rank={rank_to_save})")
+    print("=" * 60)
+    for m in method_order:
+        r_val = projection_energies.get(m, 0.0)
+        print(f"  {m:<10}: {r_val:>5.1f} %")
+    print("=" * 60 + "\n")
+
+    # 8. Save artifact
     artifact = SubspaceArtifact(
         U=U_shared.cpu(),
         rank=rank_to_save,
@@ -301,7 +312,8 @@ def main():
         explained_energy=explained_energy,
         batches_per_method=args.batches_per_method,
         seed=args.seed,
-        mean_gradients=method_gradients
+        mean_gradients=method_gradients,
+        projection_energies=projection_energies
     )
 
     artifact.save(args.output)
