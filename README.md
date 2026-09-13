@@ -53,6 +53,50 @@ All strategies keep all backbone weight matrices and LayerNorm weights strictly 
 
 ---
 
+## 🧬 Manipulation Subspace Regularization (MIBS & MBBS)
+
+> 📘 **Full Technical Note:** [docs/BIAS_SUBSPACE_NOTE.md](docs/BIAS_SUBSPACE_NOTE.md) | [Word Document (.docx)](docs/BIAS_SUBSPACE_NOTE.docx)
+
+To prevent the model from overfitting to superficial generator artifacts in the training domain, we constrain the bias updates $\Delta b = b - b_0$ ($P = 272,384$) toward an orthonormal low-rank forensic subspace $U \in \mathbb{R}^{P \times r}$ ($r=2$):
+
+$$\mathcal{L}_{total} = \mathcal{L}_{CE} + \lambda \cdot \mathcal{L}_{subspace}, \quad \text{where} \quad \mathcal{L}_{subspace} = \frac{1}{P} \|(I - U U^T) (b - b_0)\|^2$$
+
+Computed in $O(Pr)$ time without instantiating any $P \times P$ matrix.
+
+### Standard Thin SVD vs. Manipulation-Balanced Bias Subspace (MBBS)
+
+While standard SVD maximizes aggregate energy, it suffers from severe disparity—frequently neglecting manipulation types with smaller gradient magnitudes (such as Face2Face). **MBBS** optimizes $U$ on the Stiefel manifold $\text{St}(r, P)$ via QR retraction to balance projection energy across all manipulation methods:
+
+$$\max_{U \in \text{St}(r, P)} \left[ \text{mean}_m(R_m) - \beta \cdot \text{Var}_m(R_m) \right], \quad R_m = \frac{\|U^T g_m\|^2}{\|g_m\|^2}$$
+
+| Manipulation Method | Standard SVD ($r=2$) | Balanced MBBS ($r=2$) |
+| :--- | :---: | :---: |
+| **FF-DF** (Deepfakes) | 65.8 % | 55.3 % |
+| **FF-F2F** (Face2Face) | **17.6 %** *(neglected)* | **51.0 %** *(~3× boost!)* |
+| **FF-FS** (FaceSwap) | 80.5 % *(dominant)* | 60.2 % |
+| **FF-NT** (NeuralTextures) | 70.4 % | 63.6 % |
+| **Mean Coverage** | 58.5 % | 57.5 % |
+| **Minimum Coverage** | **17.6 %** | **51.0 %** |
+| **Standard Deviation** | **24.2 %** *(high disparity)* | **4.8 %** *(balanced & uniform)* |
+
+### Subspace Estimation & Training Commands
+
+```bash
+# 1. Pure SVD Estimation (extracts gradients from FF++):
+make estimate-subspace RANK=2 SUBSPACE_PATH=./bias_subspace_pair_rank2.pt
+
+# 2. Balanced MBBS Optimization (fast optimization on Stiefel manifold):
+make estimate-balanced-subspace RANK=2 SUBSPACE_PATH=./bias_subspace_pair_rank2.pt
+
+# 3. Train with Balanced Subspace Regularization (2x GPUs DDP):
+make train-balanced-subspace RANK=2 LAMBDA=0.01
+
+# 4. Verify Subspace Mathematical Properties (11 Unit Tests):
+make test-subspace
+```
+
+---
+
 ## 📁 Repository Structure
 
 ```text

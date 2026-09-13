@@ -1,8 +1,8 @@
 mode: test
 lmdb: false
-rgb_dir: '/kaggle/input/datasets/xuanhuydinh/deepfakebench/data'
+rgb_dir: '/kaggle/input/datasets/xuanhuydinh/deepfakebench/rgb'
 lmdb_dir:  './datasets/lmdb'
-dataset_json_folder: '/kaggle/input/datasets/xuanhuydinh/deepfakebench/dataset_json/dataset_json'
+dataset_json_folder: '/kaggle/input/datasets/xuanhuydinh/deepfakebench/dataset_json'
 label_dict:
   # DFD
   DFD_fake: 1

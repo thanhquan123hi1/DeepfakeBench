@@ -20,6 +20,7 @@ WEIGHTS        ?=
 PORT           ?= $(shell python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()') 
 RANK           ?= 2
 SUBSPACE_PATH  ?= ./bias_subspace_rank2.pt
+BALANCED_OUTPUT ?= ./bias_subspace_balanced_rank$(RANK).pt
 LAMBDA         ?= 0.01
 BATCHES_METHOD ?= 25 
 
@@ -145,7 +146,7 @@ estimate-balanced-subspace:
 		--subspace_method balanced_subspace \
 		--subspace_rank $(RANK) \
 		--cached_gradients_artifact $(SUBSPACE_PATH) \
-		--output ./bias_subspace_balanced_rank$(RANK).pt
+		--output $(BALANCED_OUTPUT)
 
 .PHONY: test-subspace
 test-subspace:
