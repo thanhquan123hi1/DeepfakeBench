@@ -291,7 +291,8 @@ class Trainer(object):
                 train_recorder_loss[name].update(value)
 
             # run tensorboard to visualize the training process
-            if iteration % 300 == 0 and self.config['local_rank']==0:
+            rec_interval = self.config.get('rec_iter', 300)
+            if iteration % rec_interval == 0 and self.config['local_rank']==0:
                 if self.config['SWA'] and (epoch>self.config['swa_start'] or self.config['dry_run']):
                     self.scheduler.step()
                 # info for loss
