@@ -206,6 +206,7 @@ def snapshot_initial_bias(
 def compute_subspace_loss(
     delta_b: torch.Tensor,
     U: torch.Tensor,
+    loss_type: str = "directional",
     eps: float = 1e-8
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
@@ -214,16 +215,21 @@ def compute_subspace_loss(
     Complexity: O(P * r)
     NEVER instantiates P x P projection matrix or identity matrix.
     
-    Formula:
-        coeff = U.T @ delta_b            # [r]
-        projection = U @ coeff          # [P]
-        residual = delta_b - projection # [P]
-        loss_subspace = residual.pow(2).mean()
+    Formulations:
+        1. 'directional' (Recommended):
+           L_dir = ||(I - U U^T) delta_b||^2 / (||delta_b||^2 + eps)
+                 = 1 - ||U^T delta_b||^2 / (||delta_b||^2 + eps) = 1 - R_delta_b
+           Scale-invariant and bounded in [0, 1]. Solves the 1/P under-scaling issue
+           of raw MSE and provides an effective gradient signal.
+        2. 'mse':
+           L_mse = (1 / P) * ||(I - U U^T) delta_b||^2
+           Mean squared residual across all P parameters.
         
     Args:
         delta_b: 1D tensor of shape [P], representing current bias update b - b0.
         U: 2D tensor of shape [P, r] with orthonormal columns (U.T @ U = I_r).
-        eps: Small epsilon to prevent division by zero in energy ratios.
+        loss_type: 'directional' (scale-invariant in [0, 1]) or 'mse' (mean squared error).
+        eps: Small epsilon to prevent division by zero.
         
     Returns:
         (loss_subspace, diagnostics_dict)
@@ -237,35 +243,160 @@ def compute_subspace_loss(
     projection = torch.matmul(U, coeff)            # [P]
     residual = delta_b - projection                # [P]
 
-    # Subspace loss: mean squared residual across P parameters
-    loss_subspace = residual.pow(2).mean()
+    # Compute loss depending on loss_type
+    delta_sq = torch.dot(delta_b, delta_b)
+    res_sq = torch.dot(residual, residual)
+
+    if loss_type == "directional":
+        if delta_sq.item() < eps:
+            # Degenerate delta_b == 0 at initialization: loss is exactly 0
+            loss_subspace = torch.zeros((), device=delta_b.device, dtype=delta_b.dtype, requires_grad=True)
+        else:
+            loss_subspace = res_sq / (delta_sq + eps)
+    elif loss_type == "mse":
+        loss_subspace = residual.pow(2).mean()
+    else:
+        raise ValueError(f"Unsupported loss_type '{loss_type}'. Expected 'directional' or 'mse'.")
 
     # Diagnostics
     with torch.no_grad():
         delta_norm = delta_b.norm(2).item()
         proj_norm = projection.norm(2).item()
         res_norm = residual.norm(2).item()
-        delta_sq = delta_norm ** 2
+        delta_sq_val = delta_norm ** 2
         shared_energy = (coeff.pow(2).sum()).item()
-        if delta_sq < eps:
+        if delta_sq_val < eps:
             shared_energy_ratio = 0.0
             outside_energy_ratio = 0.0
         else:
-            shared_energy_ratio = float(shared_energy / (delta_sq + eps))
+            shared_energy_ratio = float(shared_energy / (delta_sq_val + eps))
             # Clamp to [0, 1] for numerical stability
             shared_energy_ratio = max(0.0, min(1.0, shared_energy_ratio))
             outside_energy_ratio = 1.0 - shared_energy_ratio
 
     diagnostics = {
         "loss_subspace": loss_subspace.item(),
+        "loss_type": loss_type,
         "delta_norm": delta_norm,
         "shared_norm": proj_norm,
         "outside_norm": res_norm,
         "shared_energy_ratio": shared_energy_ratio,
         "outside_energy_ratio": outside_energy_ratio,
+        "R_delta_b": shared_energy_ratio,
     }
 
     return loss_subspace, diagnostics
+
+
+def project_bias_gradients(
+    backbone: nn.Module,
+    specs: List[BiasParameterSpec],
+    U: torch.Tensor,
+    alpha: float = 0.0,
+    delta_b: Optional[torch.Tensor] = None,
+    eps: float = 1e-8
+) -> Dict[str, float]:
+    """
+    Computes subspace gradient alignment diagnostics and optionally projects / shrinks
+    backbone bias gradients towards the manipulation-invariant subspace U:
+    
+        coeff_g = U.T @ g                 # [r]
+        g_parallel = U @ coeff_g          # [P]
+        g_perp = g - g_parallel           # [P]
+        
+        If alpha > 0:
+            g_tilde = (1 - alpha) * g + alpha * g_parallel = g - alpha * g_perp
+            Scatter g_tilde back to backbone bias parameter .grad tensors in-place.
+            
+    Args:
+        backbone: nn.Module containing trainable bias parameters.
+        specs: Canonical specifications of bias parameters.
+        U: 2D tensor of shape [P, r] with orthonormal columns.
+        alpha: Shrinkage factor in [0.0, 1.0].
+               alpha = 0.0: No gradient modification (diagnostics only).
+               alpha = 1.0: Full projection onto subspace U (removes 100% of g_perp).
+               0 < alpha < 1: Soft shrinkage towards U.
+        delta_b: Optional current accumulated displacement tensor [P] for computing cos(g, delta_b).
+        eps: Epsilon for numerical stability.
+        
+    Returns:
+        Dictionary of diagnostic metrics:
+            R_g: Subspace alignment ratio of instantaneous gradient ||g_parallel||^2 / ||g||^2
+            grad_norm: L2 norm of instantaneous gradient ||g||
+            grad_shared_norm: L2 norm of in-subspace gradient ||g_parallel||
+            grad_outside_norm: L2 norm of orthogonal gradient ||g_perp||
+            cos_g_delta: Cosine similarity cos(g, delta_b)
+            grad_projected_alpha: Active alpha value
+    """
+    param_dict = dict(backbone.named_parameters())
+    grad_parts = []
+    has_any_grad = False
+
+    for spec in specs:
+        param = param_dict.get(spec.name)
+        if param is not None and param.grad is not None:
+            grad_parts.append(param.grad.reshape(-1))
+            has_any_grad = True
+        elif param is not None:
+            grad_parts.append(torch.zeros(spec.numel, device=param.device, dtype=param.dtype))
+        else:
+            raise KeyError(f"Parameter '{spec.name}' not found in backbone")
+
+    if not has_any_grad:
+        return {}
+
+    g = torch.cat(grad_parts, dim=0)
+    P = g.shape[0]
+    if U.shape[0] != P:
+        raise ValueError(f"Dimension mismatch: gradient has length {P}, but U has {U.shape[0]} rows")
+
+    if U.device != g.device or U.dtype != g.dtype:
+        U = U.to(device=g.device, dtype=g.dtype)
+
+    with torch.no_grad():
+        coeff_g = torch.matmul(U.t(), g)       # [r]
+        g_parallel = torch.matmul(U, coeff_g)   # [P]
+        g_perp = g - g_parallel                 # [P]
+
+        g_norm_sq = torch.dot(g, g).item()
+        g_norm = g_norm_sq ** 0.5
+        g_par_sq = torch.dot(coeff_g, coeff_g).item()
+        g_par_norm = g_par_sq ** 0.5
+        g_perp_norm = g_perp.norm(2).item()
+
+        if g_norm_sq < eps:
+            R_g = 0.0
+        else:
+            R_g = max(0.0, min(1.0, float(g_par_sq / (g_norm_sq + eps))))
+
+        cos_g_delta = 0.0
+        if delta_b is not None:
+            delta_norm = delta_b.norm(2).item()
+            if g_norm > eps and delta_norm > eps:
+                if delta_b.device != g.device or delta_b.dtype != g.dtype:
+                    delta_b_conv = delta_b.to(device=g.device, dtype=g.dtype)
+                else:
+                    delta_b_conv = delta_b
+                cos_val = (torch.dot(g, delta_b_conv) / (g_norm * delta_norm + eps)).item()
+                cos_g_delta = max(-1.0, min(1.0, cos_val))
+
+        alpha_clamped = max(0.0, min(1.0, float(alpha)))
+        if alpha_clamped > 0.0:
+            g_tilde = (1.0 - alpha_clamped) * g + alpha_clamped * g_parallel
+            for spec in specs:
+                p = param_dict[spec.name]
+                if p.grad is not None:
+                    p.grad.copy_(g_tilde[spec.start:spec.end].view(spec.shape))
+
+    return {
+        "R_g": R_g,
+        "grad_norm": g_norm,
+        "grad_shared_norm": g_par_norm,
+        "grad_outside_norm": g_perp_norm,
+        "cos_g_delta": cos_g_delta,
+        "grad_projected_alpha": float(alpha_clamped),
+    }
+
 
 
 def compute_gradient_cosine_matrix(

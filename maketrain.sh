@@ -102,6 +102,26 @@ while [[ $# -gt 0 ]]; do
       SUBSPACE_LAMBDA="$2"
       shift 2
       ;;
+    --loss-type)
+      SUBSPACE_LOSS_TYPE="$2"
+      shift 2
+      ;;
+    --gradient-alpha)
+      GRADIENT_ALPHA="$2"
+      shift 2
+      ;;
+    -b|--batch-size)
+      BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --dataset-type)
+      DATASET_TYPE="$2"
+      shift 2
+      ;;
+    --rec-iter)
+      REC_ITER="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       ;;
@@ -125,6 +145,21 @@ if [ -n "$SUBSPACE_PATH" ]; then
 fi
 if [ -n "$SUBSPACE_LAMBDA" ]; then
   EXTRA_ARGS+=(--bias_subspace_lambda "$SUBSPACE_LAMBDA")
+fi
+if [ -n "$SUBSPACE_LOSS_TYPE" ]; then
+  EXTRA_ARGS+=(--bias_subspace_loss_type "$SUBSPACE_LOSS_TYPE")
+fi
+if [ -n "$GRADIENT_ALPHA" ]; then
+  EXTRA_ARGS+=(--gradient_subspace_alpha "$GRADIENT_ALPHA")
+fi
+if [ -n "$BATCH_SIZE" ]; then
+  EXTRA_ARGS+=(--train_batchSize "$BATCH_SIZE")
+fi
+if [ -n "$DATASET_TYPE" ]; then
+  EXTRA_ARGS+=(--dataset_type "$DATASET_TYPE")
+fi
+if [ -n "$REC_ITER" ]; then
+  EXTRA_ARGS+=(--rec_iter "$REC_ITER")
 fi
 
 echo "================================================================================"

@@ -21,6 +21,7 @@ from .bias_subspace import (
     get_ordered_bias_specs,
     snapshot_initial_bias,
     compute_subspace_loss,
+    project_bias_gradients,
     SubspaceArtifact,
 )
 
@@ -64,6 +65,8 @@ class CLIPBiasDetector(AbstractDetector):
         # 5. Subspace Regularization State (MIBS)
         self.subspace_artifact: Optional[SubspaceArtifact] = None
         self.subspace_lambda: float = 0.0
+        self.subspace_loss_type: str = "directional"
+        self.gradient_subspace_alpha: float = 0.0
         self.latest_subspace_metrics: Dict[str, float] = {}
         self.register_buffer('subspace_U', None, persistent=False)
 
@@ -111,13 +114,22 @@ class CLIPBiasDetector(AbstractDetector):
         if isinstance(subspace_cfg, dict) and subspace_cfg.get('enabled', False):
             path = subspace_cfg.get('path', None)
             lambda_val = subspace_cfg.get('lambda', 0.01)
+            loss_type = subspace_cfg.get('loss_type', 'directional')
+            grad_alpha = subspace_cfg.get('gradient_alpha', subspace_cfg.get('gradient_projection_alpha', 0.0))
             if path:
-                self.load_subspace(path, lambda_val=lambda_val)
+                self.load_subspace(
+                    path,
+                    lambda_val=lambda_val,
+                    loss_type=loss_type,
+                    gradient_alpha=grad_alpha
+                )
 
     def load_subspace(
         self,
         artifact_or_path: Union[str, SubspaceArtifact],
         lambda_val: float = 0.01,
+        loss_type: str = "directional",
+        gradient_alpha: float = 0.0,
         atol: float = 1e-4
     ):
         """
@@ -135,11 +147,14 @@ class CLIPBiasDetector(AbstractDetector):
 
         self.subspace_artifact = artifact
         self.subspace_lambda = float(lambda_val)
+        self.subspace_loss_type = str(loss_type)
+        self.gradient_subspace_alpha = float(gradient_alpha)
         U_tensor = artifact.U.to(torch.float32)
         self.register_buffer('subspace_U', U_tensor, persistent=False)
         logger.info(
             f"Loaded MIBS subspace artifact (rank={artifact.rank}, method={artifact.subspace_method}, "
-            f"lambda={self.subspace_lambda}, P={artifact.total_bias_params})"
+            f"lambda={self.subspace_lambda}, loss_type={self.subspace_loss_type}, "
+            f"gradient_alpha={self.gradient_subspace_alpha}, P={artifact.total_bias_params})"
         )
 
     def set_tuning_strategy(self, strategy: Union[str, Dict[str, Any], TuningConfig], verify: bool = True):
@@ -228,8 +243,10 @@ class CLIPBiasDetector(AbstractDetector):
                 U = U.to(device=delta_b.device, dtype=delta_b.dtype)
                 self.subspace_U = U
 
-            loss_subspace, diagnostics = compute_subspace_loss(delta_b, U)
-            self.latest_subspace_metrics = diagnostics
+            loss_subspace, diagnostics = compute_subspace_loss(
+                delta_b, U, loss_type=self.subspace_loss_type
+            )
+            self.latest_subspace_metrics.update(diagnostics)
 
             if self.subspace_lambda > 0:
                 loss_overall = loss_ce + self.subspace_lambda * loss_subspace
@@ -244,15 +261,53 @@ class CLIPBiasDetector(AbstractDetector):
 
         return {'overall': loss_ce}
 
+    def on_after_backward(self):
+        """
+        Hook called after loss.backward() and before optimizer.step().
+        Computes gradient subspace metrics (R_g, cos(g, delta_b)) and optionally projects / shrinks
+        gradients towards U if gradient_subspace_alpha > 0.
+        """
+        if self.subspace_U is None:
+            return
+
+        param_dict = dict(self.backbone.named_parameters())
+        delta_parts = []
+        for spec in self.bias_specs:
+            p = param_dict[spec.name]
+            p0 = self.initial_bias[spec.name]
+            if p0.device != p.device:
+                p0 = p0.to(p.device)
+                self.initial_bias[spec.name] = p0
+            delta_parts.append((p - p0).reshape(-1))
+        delta_b = torch.cat(delta_parts, dim=0)
+
+        grad_diagnostics = project_bias_gradients(
+            backbone=self.backbone,
+            specs=self.bias_specs,
+            U=self.subspace_U,
+            alpha=self.gradient_subspace_alpha,
+            delta_b=delta_b,
+        )
+        if grad_diagnostics:
+            self.latest_subspace_metrics.update(grad_diagnostics)
+
     def get_train_metrics(self, data_dict: dict, pred_dict: dict) -> dict:
         label = data_dict['label']
         pred = pred_dict['cls']
         auc, eer, acc, ap = calculate_metrics_for_train(label.detach(), pred.detach())
         metrics = {'acc': acc, 'auc': auc, 'eer': eer, 'ap': ap}
         if self.latest_subspace_metrics:
-            metrics['bias/update_norm'] = self.latest_subspace_metrics['delta_norm']
-            metrics['bias/shared_norm'] = self.latest_subspace_metrics['shared_norm']
-            metrics['bias/outside_norm'] = self.latest_subspace_metrics['outside_norm']
-            metrics['bias/shared_energy_ratio'] = self.latest_subspace_metrics['shared_energy_ratio']
-            metrics['bias/outside_energy_ratio'] = self.latest_subspace_metrics['outside_energy_ratio']
+            metrics['bias/update_norm'] = self.latest_subspace_metrics.get('delta_norm', 0.0)
+            metrics['bias/shared_norm'] = self.latest_subspace_metrics.get('shared_norm', 0.0)
+            metrics['bias/outside_norm'] = self.latest_subspace_metrics.get('outside_norm', 0.0)
+            metrics['bias/shared_energy_ratio'] = self.latest_subspace_metrics.get('shared_energy_ratio', 0.0)
+            metrics['bias/outside_energy_ratio'] = self.latest_subspace_metrics.get('outside_energy_ratio', 0.0)
+            if 'R_g' in self.latest_subspace_metrics:
+                metrics['bias/R_g'] = self.latest_subspace_metrics['R_g']
+            if 'R_delta_b' in self.latest_subspace_metrics:
+                metrics['bias/R_delta_b'] = self.latest_subspace_metrics['R_delta_b']
+            if 'cos_g_delta' in self.latest_subspace_metrics:
+                metrics['bias/cos_g_delta'] = self.latest_subspace_metrics['cos_g_delta']
+            if 'grad_norm' in self.latest_subspace_metrics:
+                metrics['bias/grad_norm'] = self.latest_subspace_metrics['grad_norm']
         return metrics

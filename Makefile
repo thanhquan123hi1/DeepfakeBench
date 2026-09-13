@@ -22,6 +22,10 @@ RANK           ?= 2
 SUBSPACE_PATH  ?= ./bias_subspace_rank2.pt
 BALANCED_OUTPUT ?= ./bias_subspace_balanced_rank$(RANK).pt
 LAMBDA         ?= 0.01
+LOSS_TYPE      ?= directional
+ALPHA          ?= 0.0
+BATCH_SIZE     ?= 16
+DATASET_TYPE   ?= standard
 BATCHES_METHOD ?= 25 
 
 # Extra args builder
@@ -123,11 +127,15 @@ train-v-late:
 
 .PHONY: train-subspace
 train-subspace:
-	$(MAKE) train-ddp STRATEGY=all_bias_subspace GPUS=2 EXTRA_ARGS="--bias_subspace $(SUBSPACE_PATH) --bias_subspace_lambda $(LAMBDA)"
+	$(MAKE) train-ddp STRATEGY=all_bias_subspace GPUS=2 EXTRA_ARGS="--bias_subspace $(SUBSPACE_PATH) --bias_subspace_lambda $(LAMBDA) --bias_subspace_loss_type $(LOSS_TYPE) --gradient_subspace_alpha $(ALPHA) --train_batchSize $(BATCH_SIZE) --dataset_type $(DATASET_TYPE)"
 
 .PHONY: train-balanced-subspace
 train-balanced-subspace:
-	$(MAKE) train-ddp STRATEGY=all_bias_subspace GPUS=2 EXTRA_ARGS="--bias_subspace ./bias_subspace_balanced_rank$(RANK).pt --bias_subspace_lambda $(LAMBDA)"
+	$(MAKE) train-ddp STRATEGY=all_bias_subspace GPUS=2 EXTRA_ARGS="--bias_subspace ./bias_subspace_balanced_rank$(RANK).pt --bias_subspace_lambda $(LAMBDA) --bias_subspace_loss_type $(LOSS_TYPE) --gradient_subspace_alpha $(ALPHA) --train_batchSize $(BATCH_SIZE) --dataset_type $(DATASET_TYPE)"
+
+.PHONY: train-projected-subspace
+train-projected-subspace:
+	$(MAKE) train-ddp STRATEGY=all_bias_subspace GPUS=2 ALPHA=0.5 EXTRA_ARGS="--bias_subspace ./bias_subspace_balanced_rank$(RANK).pt --bias_subspace_lambda $(LAMBDA) --bias_subspace_loss_type $(LOSS_TYPE) --gradient_subspace_alpha 0.5 --train_batchSize $(BATCH_SIZE) --dataset_type $(DATASET_TYPE)"
 
 .PHONY: estimate-subspace
 estimate-subspace:

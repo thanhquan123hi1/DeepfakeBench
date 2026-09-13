@@ -210,6 +210,9 @@ class Trainer(object):
                     losses_first = losses
                 self.optimizer.zero_grad()
                 losses['overall'].backward()
+                actual_model = self.model.module if isinstance(self.model, DDP) else self.model
+                if hasattr(actual_model, 'on_after_backward'):
+                    actual_model.on_after_backward()
                 if i == 0:
                     self.optimizer.first_step(zero_grad=True)
                 else:
@@ -224,6 +227,9 @@ class Trainer(object):
                 losses = self.model.get_losses(data_dict, predictions)
             self.optimizer.zero_grad()
             losses['overall'].backward()
+            actual_model = self.model.module if isinstance(self.model, DDP) else self.model
+            if hasattr(actual_model, 'on_after_backward'):
+                actual_model.on_after_backward()
             self.optimizer.step()
 
 

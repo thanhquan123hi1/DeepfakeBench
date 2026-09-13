@@ -34,8 +34,10 @@ from training.detectors.bias_subspace import (
     BiasParameterSpec,
     get_ordered_bias_specs,
     flatten_bias_tensors,
+    flatten_bias_gradients,
     restore_bias_tensors,
     compute_subspace_loss,
+    project_bias_gradients,
     build_subspace_svd,
     build_subspace_mean,
     build_subspace_balanced,
@@ -359,6 +361,135 @@ class TestMIBSRegularization(unittest.TestCase):
                 os.remove(test_file)
 
         print("  [PASS] Test 11: MBBS artifact serialization and deserialization verified.")
+
+    def test_12_directional_loss_properties(self):
+        """Test 12: Directional loss is scale-invariant, strictly bounded in [0, 1], and has well-scaled gradient."""
+        print(">>> Running Test 12: Directional Subspace Loss Properties...")
+        methods = ["FF-DF", "FF-F2F", "FF-FS", "FF-NT"]
+        synth_grads = {m: F.normalize(torch.randn(self.P), p=2, dim=0) for m in methods}
+        U, _, _ = build_subspace_svd(synth_grads, rank=2)
+
+        # 1. Zero vector at initialization (delta_b = 0)
+        delta_zero = torch.zeros(self.P, requires_grad=True)
+        loss_zero, diag_zero = compute_subspace_loss(delta_zero, U, loss_type="directional")
+        self.assertEqual(loss_zero.item(), 0.0)
+        self.assertEqual(diag_zero["shared_energy_ratio"], 0.0)
+        self.assertEqual(diag_zero["outside_energy_ratio"], 0.0)
+        self.assertFalse(torch.isnan(loss_zero))
+
+        # 2. In-subspace vector (delta_b = U @ alpha)
+        alpha = torch.tensor([2.0, -1.5], dtype=torch.float32)
+        delta_in = U @ alpha
+        loss_in, diag_in = compute_subspace_loss(delta_in, U, loss_type="directional")
+        self.assertLess(loss_in.item(), 1e-6)
+        self.assertGreater(diag_in["shared_energy_ratio"], 0.9999)
+
+        # 3. Orthogonal unit vector: MSE gives 1/P (~3.67e-6) while directional gives 1.0
+        raw_vec = torch.randn(self.P)
+        delta_ortho = raw_vec - U @ (U.t() @ raw_vec)
+        delta_ortho = F.normalize(delta_ortho, p=2, dim=0)
+
+        loss_mse, diag_mse = compute_subspace_loss(delta_ortho, U, loss_type="mse")
+        loss_dir, diag_dir = compute_subspace_loss(delta_ortho, U, loss_type="directional")
+
+        self.assertAlmostEqual(loss_dir.item(), 1.0, places=4, msg="Directional loss on orthogonal vector should be 1.0")
+        self.assertLess(loss_mse.item(), 1e-5, msg="MSE loss on orthogonal unit vector is diluted by 1/P")
+        self.assertGreater(loss_dir.item() / (loss_mse.item() + 1e-9), 10000.0, msg="Directional loss should be orders of magnitude stronger than diluted MSE")
+
+        # 4. Backward pass through directional loss
+        delta_test = torch.randn(self.P, requires_grad=True)
+        loss_test, _ = compute_subspace_loss(delta_test, U, loss_type="directional")
+        loss_test.backward()
+        self.assertIsNotNone(delta_test.grad)
+        self.assertFalse(torch.isnan(delta_test.grad).any())
+        self.assertGreater(delta_test.grad.norm(2).item(), 0.0)
+
+        print(f"  [PASS] Test 12: Directional loss scale verified (dir={loss_dir.item():.4f} vs mse={loss_mse.item():.2e}, backward pass valid).")
+
+    def test_13_project_bias_gradients(self):
+        """Test 13: project_bias_gradients correctly computes R_g, cos(g, delta_b), and projects gradients."""
+        print(">>> Running Test 13: Gradient Projection & Shrinkage Mechanics...")
+        detector = CLIPBiasDetector({"tuning": "all_bias"})
+        methods = ["FF-DF", "FF-F2F", "FF-FS", "FF-NT"]
+        synth_grads = {m: F.normalize(torch.randn(self.P), p=2, dim=0) for m in methods}
+        U, _, _ = build_subspace_svd(synth_grads, rank=2)
+
+        # Set fake gradients on backbone biases
+        param_dict = dict(detector.backbone.named_parameters())
+        for spec in detector.bias_specs:
+            p = param_dict[spec.name]
+            p.grad = torch.randn_like(p)
+
+        # Snapshot initial gradients
+        g_orig = flatten_bias_gradients(detector.backbone, detector.bias_specs)
+
+        # Test alpha = 0.0 (no modification)
+        diag_0 = project_bias_gradients(detector.backbone, detector.bias_specs, U, alpha=0.0)
+        g_after_0 = flatten_bias_gradients(detector.backbone, detector.bias_specs)
+        self.assertEqual((g_orig - g_after_0).abs().max().item(), 0.0)
+        self.assertIn("R_g", diag_0)
+        self.assertGreaterEqual(diag_0["R_g"], 0.0)
+        self.assertLessEqual(diag_0["R_g"], 1.0)
+
+        # Test alpha = 1.0 (strict projection onto U)
+        diag_1 = project_bias_gradients(detector.backbone, detector.bias_specs, U, alpha=1.0)
+        g_proj = flatten_bias_gradients(detector.backbone, detector.bias_specs)
+        
+        # Verify g_proj is in subspace U: (I - U U^T) g_proj == 0
+        coeff = U.t() @ g_proj
+        g_reconstructed = U @ coeff
+        diff = (g_proj - g_reconstructed).norm(2).item() / (g_proj.norm(2).item() + 1e-8)
+        self.assertLess(diff, 1e-5, f"Projected gradient with alpha=1.0 is not strictly inside U: rel_diff={diff}")
+
+        # Test alpha = 0.5 (soft shrinkage)
+        for spec in detector.bias_specs:
+            param_dict[spec.name].grad = torch.randn_like(param_dict[spec.name])
+        g_fresh = flatten_bias_gradients(detector.backbone, detector.bias_specs)
+        g_fresh_par = U @ (U.t() @ g_fresh)
+        g_fresh_perp = g_fresh - g_fresh_par
+
+        diag_half = project_bias_gradients(detector.backbone, detector.bias_specs, U, alpha=0.5)
+        g_half = flatten_bias_gradients(detector.backbone, detector.bias_specs)
+        expected_half = g_fresh_par + 0.5 * g_fresh_perp
+        diff_half = (g_half - expected_half).norm(2).item() / (g_fresh.norm(2).item() + 1e-8)
+        self.assertLess(diff_half, 1e-5, f"Shrunk gradient with alpha=0.5 mismatch: rel_diff={diff_half}")
+
+        print("  [PASS] Test 13: Gradient projection (alpha=0, alpha=1, alpha=0.5) verified.")
+
+    def test_14_detector_subspace_integration(self):
+        """Test 14: End-to-end detector on_after_backward hook and train metrics."""
+        print(">>> Running Test 14: Detector on_after_backward Hook & Metrics...")
+        detector = CLIPBiasDetector({"tuning": "all_bias"})
+        methods = ["FF-DF", "FF-F2F", "FF-FS", "FF-NT"]
+        synth_grads = {m: F.normalize(torch.randn(self.P), p=2, dim=0) for m in methods}
+        U, _, _ = build_subspace_svd(synth_grads, rank=2)
+
+        detector.subspace_U = U
+        detector.subspace_lambda = 0.05
+        detector.subspace_loss_type = "directional"
+        detector.gradient_subspace_alpha = 0.5
+
+        # Forward pass
+        synth_batch = {
+            "image": torch.randn(2, 3, 224, 224),
+            "label": torch.tensor([0, 1], dtype=torch.long)
+        }
+        pred = detector(synth_batch)
+        losses = detector.get_losses(synth_batch, pred)
+        losses["overall"].backward()
+
+        # Call the hook
+        detector.on_after_backward()
+
+        # Get metrics
+        metrics = detector.get_train_metrics(synth_batch, pred)
+        self.assertIn("bias/R_g", metrics)
+        self.assertIn("bias/shared_energy_ratio", metrics)
+        self.assertIn("bias/outside_energy_ratio", metrics)
+        self.assertIn("bias/cos_g_delta", metrics)
+        self.assertIn("bias/grad_norm", metrics)
+
+        print(f"  [PASS] Test 14: Hook integration verified (R_g={metrics['bias/R_g']:.4f}, cos(g, delta)={metrics['bias/cos_g_delta']:.4f}).")
 
 
 if __name__ == "__main__":

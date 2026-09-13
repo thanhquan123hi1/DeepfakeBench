@@ -21,6 +21,8 @@ bias_subspace:
   enabled: false
   path: null
   lambda: 0.01
+  loss_type: directional  # directional (recommended, scale-invariant) or mse
+  gradient_alpha: 0.0     # 0.0 (diagnostics only) to 1.0 (strict projection onto U)
   rank: 2
   method: shared_svd
 
@@ -44,10 +46,10 @@ bias_subspace_estimation:
 all_dataset: [FaceForensics++, FF-F2F, FF-DF, FF-FS, FF-NT, FaceShifter, DeepFakeDetection, Celeb-DF-v1, Celeb-DF-v2, DFDCP, DFDC, DeeperForensics-1.0, UADFV]
 train_dataset: [FaceForensics++]
 test_dataset: [Celeb-DF-v2]
-dataset_type: pair  # pairDataset: pairs each fake frame with source real frame for 50/50 balance
+dataset_type: standard  # standard matches baseline sampling; pair uses pairDataset
 
 compression: c23  # compression-level for videos
-train_batchSize: 8   # 8 pairs -> collates into 16 images per step (8 real + 8 fake, fits 15GB GPU)
+train_batchSize: 16   # baseline batch size (16 images per step)
 test_batchSize: 16   # test batch size
 workers: 4   # number of data loading workers
 frame_num: {'train': 8, 'test': 32}   # number of frames to use per video in training and testing

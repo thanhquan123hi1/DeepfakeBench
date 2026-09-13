@@ -54,6 +54,12 @@ parser.add_argument('--tuning', type=str, default=None, help='Tuning strategy (e
 parser.add_argument('--layer_range', type=str, default=None, help='Layer range for tuning (e.g. all, early, middle, late, 16-23)')
 parser.add_argument('--bias_subspace', type=str, default=None, help='Path to subspace artifact .pt file')
 parser.add_argument('--bias_subspace_lambda', type=float, default=None, help='Subspace regularization weight lambda (default: 0.01)')
+parser.add_argument('--bias_subspace_loss_type', type=str, default=None, choices=['directional', 'mse'], help='Subspace loss formulation: directional or mse')
+parser.add_argument('--gradient_subspace_alpha', type=float, default=None, help='Subspace gradient projection factor alpha in [0.0, 1.0]')
+parser.add_argument('--train_batchSize', type=int, default=None, help='Override train_batchSize')
+parser.add_argument('--test_batchSize', type=int, default=None, help='Override test_batchSize')
+parser.add_argument('--dataset_type', type=str, default=None, help='Override dataset_type (e.g. standard or pair)')
+parser.add_argument('--rec_iter', type=int, default=None, help='Interval for recording metrics and logging')
 
 args = parser.parse_args()
 torch.cuda.set_device(args.local_rank)
@@ -274,8 +280,21 @@ def main():
         config['bias_subspace']['path'] = args.bias_subspace
     if args.bias_subspace_lambda is not None:
         config['bias_subspace']['lambda'] = args.bias_subspace_lambda
+    if args.bias_subspace_loss_type is not None:
+        config['bias_subspace']['loss_type'] = args.bias_subspace_loss_type
+    if args.gradient_subspace_alpha is not None:
+        config['bias_subspace']['gradient_alpha'] = args.gradient_subspace_alpha
     if args.tuning == 'all_bias_subspace':
         config['bias_subspace']['enabled'] = True
+
+    if args.train_batchSize is not None:
+        config['train_batchSize'] = args.train_batchSize
+    if args.test_batchSize is not None:
+        config['test_batchSize'] = args.test_batchSize
+    if args.dataset_type is not None:
+        config['dataset_type'] = args.dataset_type
+    if args.rec_iter is not None:
+        config['rec_iter'] = args.rec_iter
         
     config['save_ckpt'] = args.save_ckpt
     config['save_feat'] = args.save_feat
