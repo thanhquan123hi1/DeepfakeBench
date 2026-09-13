@@ -247,10 +247,14 @@ def compute_subspace_loss(
         res_norm = residual.norm(2).item()
         delta_sq = delta_norm ** 2
         shared_energy = (coeff.pow(2).sum()).item()
-        shared_energy_ratio = float(shared_energy / (delta_sq + eps))
-        # Clamp to [0, 1] for numerical stability
-        shared_energy_ratio = max(0.0, min(1.0, shared_energy_ratio))
-        outside_energy_ratio = 1.0 - shared_energy_ratio
+        if delta_sq < eps:
+            shared_energy_ratio = 0.0
+            outside_energy_ratio = 0.0
+        else:
+            shared_energy_ratio = float(shared_energy / (delta_sq + eps))
+            # Clamp to [0, 1] for numerical stability
+            shared_energy_ratio = max(0.0, min(1.0, shared_energy_ratio))
+            outside_energy_ratio = 1.0 - shared_energy_ratio
 
     diagnostics = {
         "loss_subspace": loss_subspace.item(),
